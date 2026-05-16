@@ -45,11 +45,11 @@ M.send_current_block = function(term_id)
 
   local lang_config = {
     python = {
-      command = "^#",
+      comment = "^#",
       start_cmd = "sipy",
     },
     matlab = {
-      command = "^%%",
+      comment = "^%%",
       start_cmd = "matlab -nodisplay",
     },
   }
@@ -88,6 +88,10 @@ M.register_commands = function()
   vim.api.nvim_create_user_command("CodeRunBlock", function(opts)
     M.send_current_block(tonumber(opts.args) or 1)
   end, { nargs = "?" })
+end
+
+M.setup = function()
+  M.register_commands()
 end
 
 return M
