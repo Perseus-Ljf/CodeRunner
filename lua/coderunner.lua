@@ -78,7 +78,7 @@ M.send_current_block = function(term_id)
     toggleterm.exec(config.start_cmd, term_id)
     vim.defer_fn(function()
       toggleterm.exec(code, term_id)
-    end, 100)
+    end, 500)
   else
     toggleterm.exec(code, term_id)
   end
