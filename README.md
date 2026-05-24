@@ -89,25 +89,6 @@ require("coderunner").setup({
   jump = true,
   notify = true,
   enabled_filetypes = { "python" },
-  keymaps = {
-    block = {
-      lhs = "<leader>rb",
-      args = "show jump",
-      desc = "Run current code cell",
-    },
-    current_line = {
-      {
-        lhs = "<leader>rl",
-        args = "show nojump",
-        desc = "Run current Tree-sitter item",
-      },
-      {
-        lhs = "<leader>rL",
-        args = "hide jump",
-        desc = "Run current Tree-sitter item in background",
-      },
-    },
-  },
   languages = {
     python = {
       cell_marker = "^%s*# %%",
@@ -130,7 +111,29 @@ require("coderunner").setup({
 
 You can add or override entries in `languages` for any Neovim filetype.
 
-Keymap entries call the same command path as user commands, so `args` accepts
-the same `show` / `hide`, `jump` / `nojump`, and `term=2` values. Use
-`block` for `CodeRunBlock` behavior and `current_line` for `RunCurrentLine`
-behavior.
+## Keymaps
+
+CodeRunner does not create keymaps internally. Use Neovim's normal keymap API:
+
+```lua
+vim.keymap.set("n", "<leader>rb", "<cmd>CodeRunBlock show jump<cr>", {
+  desc = "Run current code cell",
+})
+
+vim.keymap.set("n", "<leader>rl", function()
+  require("coderunner").run_line("show nojump")
+end, {
+  desc = "Run current Tree-sitter item",
+})
+
+vim.keymap.set("n", "<leader>rL", function()
+  require("coderunner").run_line("hide jump term=2")
+end, {
+  desc = "Run current Tree-sitter item in background",
+})
+```
+
+Lua helpers accept the same argument string as commands:
+
+- `require("coderunner").run_block("hide nojump")`
+- `require("coderunner").run_line("term=2 show jump")`

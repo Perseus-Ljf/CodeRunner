@@ -377,6 +377,14 @@ function M.run_command(kind, args)
   end
 end
 
+function M.run_block(args)
+  M.run_command("block", args)
+end
+
+function M.run_line(args)
+  M.run_command("line", args)
+end
+
 local function command_complete()
   return {
     "show",
@@ -389,31 +397,6 @@ local function command_complete()
     "nojump",
     "term=1",
   }
-end
-
-local function normalize_keymap_specs(specs)
-  if not specs then
-    return {}
-  end
-
-  if type(specs) == "string" then
-    return { { lhs = specs } }
-  end
-
-  if specs.lhs then
-    return { specs }
-  end
-
-  return specs
-end
-
-local function keymap_desc(kind, args)
-  local target = kind == "line" and "current Tree-sitter item" or "current code cell"
-  if args and args ~= "" then
-    return ("CodeRunner: run %s (%s)"):format(target, args)
-  end
-
-  return ("CodeRunner: run %s"):format(target)
 end
 
 function M.register_commands()
@@ -454,32 +437,9 @@ function M.register_commands()
   })
 end
 
-function M.register_keymaps()
-  for kind, specs in pairs(config.options.keymaps or {}) do
-    local command_kind = kind == "current_line" and "line" or kind
-
-    for _, spec in ipairs(normalize_keymap_specs(specs)) do
-      local lhs = spec.lhs
-      if lhs then
-        local args = spec.args or ""
-        local opts = {
-          desc = spec.desc or keymap_desc(command_kind, args),
-          silent = vim.F.if_nil(spec.silent, true),
-          buffer = spec.buffer,
-        }
-
-        vim.keymap.set(spec.mode or spec.modes or "n", lhs, function()
-          M.run_command(command_kind, args)
-        end, opts)
-      end
-    end
-  end
-end
-
 function M.setup(opts)
   config.setup(opts)
   M.register_commands()
-  M.register_keymaps()
 end
 
 return M
