@@ -7,6 +7,7 @@ M.defaults = {
   jump = true,
   notify = true,
   enabled_filetypes = { "python" },
+  keymaps = {},
   languages = {
     python = {
       cell_marker = "^%s*# %%",

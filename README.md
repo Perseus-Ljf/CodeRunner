@@ -75,6 +75,7 @@ Examples:
 ```vim
 :CodeRunBlock show jump
 :CodeRunBlock hide nojump
+:CodeRunBlock term=2 show=false jump=false
 :RunCurrentLine term=2 show nojump
 ```
 
@@ -88,6 +89,25 @@ require("coderunner").setup({
   jump = true,
   notify = true,
   enabled_filetypes = { "python" },
+  keymaps = {
+    block = {
+      lhs = "<leader>rb",
+      args = "show jump",
+      desc = "Run current code cell",
+    },
+    current_line = {
+      {
+        lhs = "<leader>rl",
+        args = "show nojump",
+        desc = "Run current Tree-sitter item",
+      },
+      {
+        lhs = "<leader>rL",
+        args = "hide jump",
+        desc = "Run current Tree-sitter item in background",
+      },
+    },
+  },
   languages = {
     python = {
       cell_marker = "^%s*# %%",
@@ -109,3 +129,8 @@ require("coderunner").setup({
 ```
 
 You can add or override entries in `languages` for any Neovim filetype.
+
+Keymap entries call the same command path as user commands, so `args` accepts
+the same `show` / `hide`, `jump` / `nojump`, and `term=2` values. Use
+`block` for `CodeRunBlock` behavior and `current_line` for `RunCurrentLine`
+behavior.
