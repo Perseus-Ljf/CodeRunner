@@ -3,7 +3,10 @@ local M = {}
 M.defaults = {
   term_id = 1,
   startup_delay = 500,
+  show_terminal = true,
+  jump = true,
   notify = true,
+  enabled_filetypes = { "python" },
   languages = {
     python = {
       cell_marker = "^%s*# %%",
@@ -31,6 +34,10 @@ end
 
 function M.get_language(filetype)
   return M.options.languages[filetype] or M.options.languages.python
+end
+
+function M.is_enabled_filetype(filetype)
+  return vim.tbl_contains(M.options.enabled_filetypes, filetype)
 end
 
 return M

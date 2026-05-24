@@ -1,11 +1,15 @@
 # CodeRunner.nvim
 
-Send the current code cell from Neovim to a `toggleterm.nvim` terminal.
+Send Python code cells or Tree-sitter code items from Neovim to a
+`toggleterm.nvim` terminal.
 
 ## How it works
 
-CodeRunner finds the code cell around the cursor by looking for language-specific
-cell markers:
+CodeRunner is enabled only for the `python` filetype by default. Other
+filetypes can be enabled through configuration.
+
+For cell commands, CodeRunner finds the code cell around the cursor by looking
+for language-specific cell markers:
 
 - Python and Julia: `# %%`
 - MATLAB: `%%`
@@ -19,10 +23,16 @@ When `:CodeRunBlock` or `:CodeRunCell` is executed, the plugin:
 5. Starts the configured language command when the terminal is new.
 6. Sends the filtered code to that terminal.
 
+For `:RunCurrentLine` and `:CodeRunCurrentLine`, CodeRunner uses Tree-sitter to
+find the current Python code item. If the cursor is inside a function or class,
+the whole nearest function or class is sent. Otherwise, the current statement is
+sent, including multi-line calls, assignments, and other split statements.
+
 ## Requirements
 
 - Neovim 0.8+
 - [toggleterm.nvim](https://github.com/akinsho/toggleterm.nvim)
+- A Tree-sitter parser for Python when using `RunCurrentLine`
 
 ## Installation
 
@@ -44,11 +54,29 @@ registered automatically when it is loaded by a plugin manager.
 ## Commands
 
 ```vim
-:CodeRunBlock [term_id]
-:CodeRunCell [term_id]
+:CodeRunBlock [args]
+:CodeRunCell [args]
+:CodeRunCurrentLine [args]
+:RunCurrentLine [args]
 ```
 
-Both commands do the same thing. `term_id` is optional and defaults to `1`.
+`CodeRunBlock` and `CodeRunCell` do the same thing. `CodeRunCurrentLine` and
+`RunCurrentLine` do the same thing.
+
+Arguments are whitespace-separated:
+
+- `1`, `2`, or `term=2`: target toggleterm id.
+- `show` / `hide`: show or hide the terminal after sending code.
+- `jump` / `nojump`: move to the next cell or next Tree-sitter item after
+  sending code.
+
+Examples:
+
+```vim
+:CodeRunBlock show jump
+:CodeRunBlock hide nojump
+:RunCurrentLine term=2 show nojump
+```
 
 ## Configuration
 
@@ -56,7 +84,10 @@ Both commands do the same thing. `term_id` is optional and defaults to `1`.
 require("coderunner").setup({
   term_id = 1,
   startup_delay = 500,
+  show_terminal = true,
+  jump = true,
   notify = true,
+  enabled_filetypes = { "python" },
   languages = {
     python = {
       cell_marker = "^%s*# %%",

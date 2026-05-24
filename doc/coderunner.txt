@@ -11,28 +11,58 @@ CONTENTS                                                        *coderunner*
 ==============================================================================
 1. Introduction                                      *coderunner-introduction*
 
-CodeRunner sends the current code cell to a toggleterm.nvim terminal.
+CodeRunner sends Python code cells or Tree-sitter code items to a
+toggleterm.nvim terminal.
 
-The plugin finds the current cell by scanning for language-specific markers.
+The plugin is enabled only for the `python` filetype by default.
+
+Cell commands find the current cell by scanning for language-specific markers.
 Python and Julia use `# %%`. MATLAB uses `%%`. Blank lines and comment-only
 lines are removed before the code is sent to the terminal.
+
+Tree-sitter commands find the current Python code item. If the cursor is inside
+a function or class, the whole nearest function or class is sent. Otherwise, the
+current statement is sent, including multi-line statements.
 
 ==============================================================================
 2. Requirements                                      *coderunner-requirements*
 
 - Neovim 0.8+
 - toggleterm.nvim
+- A Python Tree-sitter parser for |:RunCurrentLine|
 
 ==============================================================================
 3. Commands                                              *coderunner-commands*
 
                                                         *:CodeRunBlock*
-:CodeRunBlock [term_id]
-        Send the current code cell to the given toggleterm terminal.
+:CodeRunBlock [args]
+        Send the current code cell to toggleterm.
 
                                                         *:CodeRunCell*
-:CodeRunCell [term_id]
+:CodeRunCell [args]
         Alias of |:CodeRunBlock|.
+
+                                                        *:CodeRunCurrentLine*
+:CodeRunCurrentLine [args]
+        Send the current Tree-sitter code item to toggleterm.
+
+                                                        *:RunCurrentLine*
+:RunCurrentLine [args]
+        Alias of |:CodeRunCurrentLine|.
+
+Arguments are whitespace-separated:
+>
+  1, 2, term=2     target toggleterm id
+  show, hide       show or hide the terminal after sending code
+  jump, nojump     move to the next cell or Tree-sitter item, or stay put
+<
+
+Examples:
+>
+  :CodeRunBlock show jump
+  :CodeRunBlock hide nojump
+  :RunCurrentLine term=2 show nojump
+<
 
 ==============================================================================
 4. Configuration                                  *coderunner-configuration*
@@ -41,7 +71,10 @@ lines are removed before the code is sent to the terminal.
   require("coderunner").setup({
     term_id = 1,
     startup_delay = 500,
+    show_terminal = true,
+    jump = true,
     notify = true,
+    enabled_filetypes = { "python" },
     languages = {
       python = {
         cell_marker = "^%s*# %%",
