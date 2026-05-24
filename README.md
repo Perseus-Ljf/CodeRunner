@@ -1,47 +1,80 @@
-# A Neovim Plugin Template
+# CodeRunner.nvim
 
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/ellisonleao/nvim-plugin-template/lint-test.yml?branch=main&style=for-the-badge)
-![Lua](https://img.shields.io/badge/Made%20with%20Lua-blueviolet.svg?style=for-the-badge&logo=lua)
+Send the current code cell from Neovim to a `toggleterm.nvim` terminal.
 
-A template repository for Neovim plugins.
+## How it works
 
-## Using it
+CodeRunner finds the code cell around the cursor by looking for language-specific
+cell markers:
 
-Via `gh`:
+- Python and Julia: `# %%`
+- MATLAB: `%%`
 
+When `:CodeRunBlock` or `:CodeRunCell` is executed, the plugin:
+
+1. Finds the nearest cell marker above the cursor and the next marker below it.
+2. Reads the lines inside that range.
+3. Drops blank lines and language comment-only lines.
+4. Opens or reuses a `toggleterm.nvim` terminal.
+5. Starts the configured language command when the terminal is new.
+6. Sends the filtered code to that terminal.
+
+## Requirements
+
+- Neovim 0.8+
+- [toggleterm.nvim](https://github.com/akinsho/toggleterm.nvim)
+
+## Installation
+
+With `lazy.nvim`:
+
+```lua
+{
+  "your-name/CodeRunner",
+  dependencies = { "akinsho/toggleterm.nvim" },
+  config = function()
+    require("coderunner").setup()
+  end,
+}
 ```
-$ gh repo create my-plugin -p ellisonleao/nvim-plugin-template
+
+The plugin also has a `plugin/coderunner.lua` runtime file, so commands are
+registered automatically when it is loaded by a plugin manager.
+
+## Commands
+
+```vim
+:CodeRunBlock [term_id]
+:CodeRunCell [term_id]
 ```
 
-Via github web page:
+Both commands do the same thing. `term_id` is optional and defaults to `1`.
 
-Click on `Use this template`
+## Configuration
 
-![](https://docs.github.com/assets/cb-36544/images/help/repository/use-this-template-button.png)
-
-## Features and structure
-
-- 100% Lua
-- Github actions for:
-  - running tests using [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) and [busted](https://olivinelabs.com/busted/)
-  - check for formatting errors (Stylua)
-  - vimdocs autogeneration from README.md file
-  - luarocks release (LUAROCKS_API_KEY secret configuration required)
-
-### Plugin structure
-
+```lua
+require("coderunner").setup({
+  term_id = 1,
+  startup_delay = 500,
+  notify = true,
+  languages = {
+    python = {
+      cell_marker = "^%s*# %%",
+      comment = "^#",
+      start_cmd = "sipy",
+    },
+    matlab = {
+      cell_marker = "^%s*%%",
+      comment = "^%%",
+      start_cmd = "matlab -nodisplay",
+    },
+    julia = {
+      cell_marker = "^%s*# %%",
+      comment = "^#",
+      start_cmd = "julia",
+    },
+  },
+})
 ```
-.
-├── lua
-│   ├── plugin_name
-│   │   └── module.lua
-│   └── plugin_name.lua
-├── Makefile
-├── plugin
-│   └── plugin_name.lua
-├── README.md
-├── tests
-│   ├── minimal_init.lua
-│   └── plugin_name
-│       └── plugin_name_spec.lua
-```
+
+You can add or override entries in `languages` for any Neovim filetype.

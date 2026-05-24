@@ -1,0 +1,67 @@
+*coderunner.txt*                         For Neovim >= 0.8.0
+
+==============================================================================
+CONTENTS                                                        *coderunner*
+
+1. Introduction                                      |coderunner-introduction|
+2. Requirements                                      |coderunner-requirements|
+3. Commands                                              |coderunner-commands|
+4. Configuration                                  |coderunner-configuration|
+
+==============================================================================
+1. Introduction                                      *coderunner-introduction*
+
+CodeRunner sends the current code cell to a toggleterm.nvim terminal.
+
+The plugin finds the current cell by scanning for language-specific markers.
+Python and Julia use `# %%`. MATLAB uses `%%`. Blank lines and comment-only
+lines are removed before the code is sent to the terminal.
+
+==============================================================================
+2. Requirements                                      *coderunner-requirements*
+
+- Neovim 0.8+
+- toggleterm.nvim
+
+==============================================================================
+3. Commands                                              *coderunner-commands*
+
+                                                        *:CodeRunBlock*
+:CodeRunBlock [term_id]
+        Send the current code cell to the given toggleterm terminal.
+
+                                                        *:CodeRunCell*
+:CodeRunCell [term_id]
+        Alias of |:CodeRunBlock|.
+
+==============================================================================
+4. Configuration                                  *coderunner-configuration*
+
+>
+  require("coderunner").setup({
+    term_id = 1,
+    startup_delay = 500,
+    notify = true,
+    languages = {
+      python = {
+        cell_marker = "^%s*# %%",
+        comment = "^#",
+        start_cmd = "sipy",
+      },
+      matlab = {
+        cell_marker = "^%s*%%",
+        comment = "^%%",
+        start_cmd = "matlab -nodisplay",
+      },
+      julia = {
+        cell_marker = "^%s*# %%",
+        comment = "^#",
+        start_cmd = "julia",
+      },
+    },
+  })
+<
+
+You can add or override entries in `languages` for any Neovim filetype.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
