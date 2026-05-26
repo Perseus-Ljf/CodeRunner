@@ -342,11 +342,10 @@ function M.send_current_block(opts)
   end
 
   local start_line, end_line = find_cell_range()
-  local sent = send_range(start_line, end_line, opts)
-
-  if sent and opts.jump then
+  if opts.jump then
     jump_to_line(end_line + 1)
   end
+  send_range(start_line, end_line, opts)
 end
 
 function M.run_current_line(opts)
@@ -359,12 +358,11 @@ function M.run_current_line(opts)
   if not start_line then
     return
   end
-
-  local sent = send_range(start_line, end_line, opts)
-
-  if sent and opts.jump then
+  if opts.jump then
     jump_to_next_treesitter_item(root, filetype, end_line)
   end
+
+  send_range(start_line, end_line, opts)
 end
 
 function M.run_command(kind, args)
