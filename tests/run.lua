@@ -72,6 +72,40 @@ for _, language in ipairs({ "python", "julia" }) do
   )
 end
 
+test("runtime: loading after setup preserves user configuration", function()
+  reset("julia", { "x = 1" }, {
+    enabled_filetypes = { "python", "julia" },
+    term_id = 7,
+    startup_delay = 1500,
+    languages = { julia = { start_cmd = "julia --project=." } },
+  })
+  local config = require("coderunner.config")
+  local expected = vim.deepcopy(config.options)
+  vim.g.loaded_coderunner = nil
+  dofile("plugin/coderunner.lua")
+  equal(config.options, expected)
+  runner.run_line("nojump")
+  sent({ "x = 1" })
+  equal(calls[1].id, 7)
+end)
+
+test("runtime: registers commands with defaults without calling setup", function()
+  reset("python", { "x = 1" })
+  local config = require("coderunner.config")
+  config.setup()
+  local commands = { "CodeRunBlock", "CodeRunCell", "CodeRunCurrentLine", "RunCurrentLine", "CodeRunSelection" }
+  for _, name in ipairs(commands) do
+    vim.api.nvim_del_user_command(name)
+  end
+  vim.g.loaded_coderunner = nil
+  dofile("plugin/coderunner.lua")
+  equal(config.options, config.defaults)
+  for _, name in ipairs(commands) do
+    equal(vim.fn.exists(":" .. name), 2)
+  end
+  equal(vim.g.loaded_coderunner, 1)
+end)
+
 local julia_cases = {
   {
     name = "abstract type definition",

@@ -3,4 +3,4 @@ if vim.g.loaded_coderunner == 1 then
 end
 vim.g.loaded_coderunner = 1
 
-require("coderunner").setup()
+require("coderunner").register_commands()
