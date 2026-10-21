@@ -42,6 +42,49 @@ local CONTAINER_NODE_TYPES = {
     function_definition = true,
     async_function_definition = true,
   },
+  julia = {
+    function_definition = true,
+    macro_definition = true,
+    struct_definition = true,
+    module_definition = true,
+    abstract_definition = true,
+    primitive_definition = true,
+    arrow_function_expression = true,
+  },
+}
+
+local JULIA_BLOCK_PARENTS = {
+  function_definition = true,
+  macro_definition = true,
+  struct_definition = true,
+  module_definition = true,
+  compound_statement = true,
+  quote_statement = true,
+  let_statement = true,
+  if_statement = true,
+  elseif_clause = true,
+  else_clause = true,
+  try_statement = true,
+  catch_clause = true,
+  finally_clause = true,
+  for_statement = true,
+  while_statement = true,
+  do_clause = true,
+}
+
+local JULIA_NON_ITEMS = {
+  line_comment = true,
+  block_comment = true,
+  block = true,
+  ERROR = true,
+  signature = true,
+  type_head = true,
+  for_binding = true,
+  let_binding = true,
+  elseif_clause = true,
+  else_clause = true,
+  catch_clause = true,
+  finally_clause = true,
 }
 
 local function notify(message, level)
@@ -161,26 +204,24 @@ local function filter_lines(lines, lang)
   return filtered
 end
 
-local function send_range(start_line, end_line, opts)
-  local toggleterm, terminal = get_toggleterm()
-  if not toggleterm then
-    return
-  end
-
-  local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
-  local lang = config.get_language(vim.bo.filetype)
-  local filtered_lines = filter_lines(lines, lang)
-
-  if #filtered_lines == 0 then
-    notify("Current cell is empty", vim.log.levels.WARN)
+local function send_lines(lines, opts, lang)
+  local code = table.concat(lines, "\n")
+  if not code:match("%S") then
+    notify("No code to send", vim.log.levels.WARN)
     return false
   end
 
-  local code = table.concat(filtered_lines, "\n") .. "\n"
-  local term_id = opts.term_id or config.options.term_id
+  local toggleterm, terminal = get_toggleterm()
+  if not toggleterm then
+    return false
+  end
+
+  lang = lang or config.get_language(current_filetype())
+  code = code .. "\n"
+  local term_id = opts.term_id
   local show_terminal = opts.show_terminal
 
-  if terminal.get(term_id, true) == nil or terminal.get(term_id, false) == nil then
+  if terminal.get(term_id, true) == nil then
     if lang.start_cmd and lang.start_cmd ~= "" then
       toggleterm.exec(lang.start_cmd, term_id, nil, nil, nil, nil, true, show_terminal)
     end
@@ -192,6 +233,48 @@ local function send_range(start_line, end_line, opts)
   end
 
   return true
+end
+
+local function send_range(start_line, end_line, opts)
+  local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
+  local lang = config.get_language(current_filetype())
+  return send_lines(filter_lines(lines, lang), opts, lang)
+end
+
+local function selection_lines(range)
+  local mode = vim.fn.mode()
+  local visual = mode == "v" or mode == "V" or mode == "\22"
+  local first = vim.fn.getpos("'<")[2]
+  local last = vim.fn.getpos("'>")[2]
+
+  if range and (range[1] ~= first or range[2] ~= last) then
+    return vim.api.nvim_buf_get_lines(0, range[1] - 1, range[2], false)
+  end
+  if not visual and (first == 0 or last == 0) then
+    notify("No visual selection available", vim.log.levels.WARN)
+    return nil
+  end
+
+  -- Native yanking handles tabs, Unicode, exclusive and blockwise selections.
+  local register = vim.fn.getreginfo("z")
+  local unnamed = vim.fn.getreginfo('"')
+  local clipboard = vim.o.clipboard
+  local view = vim.fn.winsaveview()
+  vim.o.clipboard = ""
+  local ok, lines = pcall(function()
+    vim.cmd("silent noautocmd keepjumps normal! " .. (visual and "" or "gv") .. '"zy')
+    return vim.fn.getreg("z", 1, true)
+  end)
+  vim.fn.setreg("z", register)
+  vim.fn.setreg('"', unnamed)
+  vim.o.clipboard = clipboard
+  vim.fn.winrestview(view)
+
+  if not ok then
+    notify("Unable to read visual selection: " .. tostring(lines), vim.log.levels.ERROR)
+    return nil
+  end
+  return lines
 end
 
 local function jump_to_line(line_nr)
@@ -223,22 +306,79 @@ local function node_contains_cursor(node, row, col)
     return false
   end
 
-  if row == end_row and col > end_col then
+  if row == end_row and col >= end_col then
     return false
   end
 
   return true
 end
 
-local function candidate_types(filetype)
-  return NODE_TYPES[filetype] or NODE_TYPES.python
+local function is_candidate(node, filetype)
+  if filetype ~= "julia" then
+    return (NODE_TYPES[filetype] or {})[node:type()]
+  end
+
+  local parent = node:parent()
+  if not parent or not node:named() or JULIA_NON_ITEMS[node:type()] then
+    return false
+  end
+  local parent_type = parent:type()
+  if parent_type == "source_file" or parent_type == "block" then
+    return true
+  end
+
+  -- Older Julia parsers inline block bodies into their owning statements.
+  if not JULIA_BLOCK_PARENTS[parent_type] then
+    return false
+  end
+  if node == parent:field("condition")[1] or node == parent:field("name")[1] then
+    return false
+  end
+  if parent_type == "let_statement" or parent_type == "do_clause" or parent_type == "catch_clause" then
+    local row = node:range()
+    local parent_row = parent:range()
+    return row > parent_row
+  end
+  return true
 end
 
-local function container_types(filetype)
-  return CONTAINER_NODE_TYPES[filetype] or CONTAINER_NODE_TYPES.python
+local function is_container(node, filetype)
+  if (CONTAINER_NODE_TYPES[filetype] or {})[node:type()] then
+    return true
+  end
+  if filetype ~= "julia" then
+    return false
+  end
+
+  if node:type() == "assignment" then
+    local signature = node:named_child(0)
+    while signature and (signature:type() == "where_expression" or signature:type() == "typed_expression") do
+      signature = signature:named_child(0)
+    end
+    if signature and signature:type() == "call_expression" then
+      return true
+    end
+  elseif node:type() == "call_expression" or node:type() == "broadcast_call_expression" then
+    for child in node:iter_children() do
+      if child:type() == "do_clause" then
+        return true
+      end
+    end
+  end
+  return false
 end
 
-local function include_decorators(node)
+local function include_wrappers(node, filetype)
+  if filetype == "julia" then
+    local parent = node:parent()
+    -- Keep macro wrappers and assignments around anonymous/short-form functions.
+    while parent and not is_candidate(node, filetype) do
+      node = parent
+      parent = node:parent()
+    end
+    return node
+  end
+
   local parent = node:parent()
   if parent and parent:type() == "decorated_definition" then
     return parent
@@ -248,8 +388,6 @@ local function include_decorators(node)
 end
 
 local function smallest_candidate_at_cursor(root, filetype, row, col)
-  local types = candidate_types(filetype)
-  local containers = container_types(filetype)
   local best_container
   local best_statement
 
@@ -258,10 +396,9 @@ local function smallest_candidate_at_cursor(root, filetype, row, col)
       return
     end
 
-    local node_type = node:type()
-    if containers[node_type] then
-      best_container = include_decorators(node)
-    elseif types[node_type] then
+    if is_container(node, filetype) then
+      best_container = include_wrappers(node, filetype)
+    elseif is_candidate(node, filetype) then
       best_statement = node
     end
 
@@ -275,13 +412,12 @@ local function smallest_candidate_at_cursor(root, filetype, row, col)
 end
 
 local function next_candidate_after(root, filetype, row, col)
-  local types = candidate_types(filetype)
   local best
 
   local function visit(node)
     local start_row, start_col = node:range()
 
-    if types[node:type()] and (start_row > row or (start_row == row and start_col > col)) then
+    if is_candidate(node, filetype) and (start_row > row or (start_row == row and start_col >= col)) then
       if not best then
         best = node
       else
@@ -304,6 +440,10 @@ end
 local function find_treesitter_range()
   local bufnr = vim.api.nvim_get_current_buf()
   local filetype = current_filetype()
+  if filetype ~= "python" and filetype ~= "julia" then
+    notify("Tree-sitter execution is not supported for filetype '" .. filetype .. "'", vim.log.levels.WARN)
+    return nil
+  end
   local root = get_parser_root(bufnr, filetype)
   if not root then
     notify("Tree-sitter parser is not available for current buffer", vim.log.levels.ERROR)
@@ -313,6 +453,10 @@ local function find_treesitter_range()
   local cursor = vim.api.nvim_win_get_cursor(0)
   local row = cursor[1] - 1
   local col = cursor[2]
+  local line = vim.api.nvim_get_current_line()
+  if line:sub(1, col):match("^%s*$") then
+    col = math.max(col, #(line:match("^%s*") or ""))
+  end
   local node = smallest_candidate_at_cursor(root, filetype, row, col)
 
   if not node then
@@ -320,12 +464,14 @@ local function find_treesitter_range()
     return nil
   end
 
-  local start_row, _, end_row = node:range()
-  return start_row + 1, end_row + 1, root, filetype
+  local start_row, _, end_row, end_col = node:range()
+  local end_line = end_col == 0 and end_row or end_row + 1
+  return start_row + 1, end_line, root, filetype, node
 end
 
-local function jump_to_next_treesitter_item(root, filetype, end_line)
-  local node = next_candidate_after(root, filetype, end_line - 1, 0)
+local function jump_to_next_treesitter_item(root, filetype, end_line, current_node)
+  local _, _, end_row, end_col = current_node:range()
+  local node = next_candidate_after(root, filetype, end_row, end_col)
   if not node then
     jump_to_line(end_line + 1)
     return
@@ -354,24 +500,43 @@ function M.run_current_line(opts)
     return
   end
 
-  local start_line, end_line, root, filetype = find_treesitter_range()
+  local start_line, end_line, root, filetype, node = find_treesitter_range()
   if not start_line then
     return
   end
+  local start_row, start_col, end_row, end_col = node:range()
+  local first_line = vim.api.nvim_buf_get_lines(0, start_row, start_row + 1, false)[1]
+  if first_line:sub(1, start_col):match("^%s*$") then
+    start_col = 0
+  end
+  local lines = vim.api.nvim_buf_get_text(0, start_row, start_col, end_row, end_col, {})
   if opts.jump then
-    jump_to_next_treesitter_item(root, filetype, end_line)
+    jump_to_next_treesitter_item(root, filetype, end_line, node)
   end
 
-  send_range(start_line, end_line, opts)
+  return send_lines(lines, opts)
+end
+
+function M.send_selection(opts, range)
+  opts = normalize_opts(opts)
+  local lines = selection_lines(range)
+  if not lines then
+    return false
+  end
+  -- Unknown filetypes use the existing terminal/default shell, not Python's REPL.
+  local lang = config.options.languages[current_filetype()] or {}
+  return send_lines(lines, opts, lang)
 end
 
 function M.run_command(kind, args)
   local opts = parse_args(args or "")
 
-  if kind == "line" then
-    M.run_current_line(opts)
+  if kind == "selection" then
+    return M.send_selection(opts)
+  elseif kind == "line" then
+    return M.run_current_line(opts)
   else
-    M.send_current_block(opts)
+    return M.send_current_block(opts)
   end
 end
 
@@ -381,6 +546,10 @@ end
 
 function M.run_line(args)
   M.run_command("line", args)
+end
+
+function M.run_selection(args)
+  return M.run_command("selection", args)
 end
 
 local function command_complete()
@@ -398,6 +567,17 @@ local function command_complete()
 end
 
 function M.register_commands()
+  vim.api.nvim_create_user_command("CodeRunSelection", function(opts)
+    local range = opts.range > 0 and { opts.line1, opts.line2 } or nil
+    M.send_selection(parse_args(opts.args), range)
+  end, {
+    force = true,
+    nargs = "*",
+    range = true,
+    complete = command_complete,
+    desc = "Send the visual selection to toggleterm without changing whitespace",
+  })
+
   vim.api.nvim_create_user_command("CodeRunBlock", function(opts)
     M.run_command("block", opts.args)
   end, {

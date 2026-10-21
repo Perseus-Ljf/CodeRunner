@@ -12,7 +12,7 @@ jobs:
         with:
           version: latest
           token: ${{ secrets.GITHUB_TOKEN }}
-          args: --color always --check lua
+          args: --color always --check lua tests
 
   test:
     runs-on: ubuntu-latest
@@ -29,6 +29,9 @@ jobs:
         with:
           neovim: true
           version: ${{ matrix.nvim-versions }}
+
+      - name: install test parsers
+        run: make test-deps
 
       - name: run tests
         run: make test

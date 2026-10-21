@@ -12,25 +12,51 @@ CONTENTS                                                        *coderunner*
 ==============================================================================
 1. Introduction                                      *coderunner-introduction*
 
-CodeRunner sends Python code cells or Tree-sitter code items to a
-toggleterm.nvim terminal.
+CodeRunner sends Python/Julia code cells, Tree-sitter code items, or visual
+selections from any filetype to a toggleterm.nvim terminal.
 
-The plugin is enabled only for the `python` filetype by default.
+Cell and Tree-sitter commands are enabled only for `python` by default.
+Enable Julia with:
+>
+  require("coderunner").setup({
+    enabled_filetypes = { "python", "julia" },
+  })
+<
+Visual selection commands work in every filetype regardless of this list.
 
 Cell commands find the current cell by scanning for language-specific markers.
 Python and Julia use `# %%`. MATLAB uses `%%`. Blank lines and comment-only
 lines are removed before the code is sent to the terminal.
 
-Tree-sitter commands find the current Python code item. If the cursor is inside
-a function or class, the whole nearest function or class is sent. Otherwise, the
-current statement is sent, including multi-line statements.
+Tree-sitter commands find the current Python or Julia code item. In Python,
+the whole nearest function or class is sent; otherwise the current statement
+is sent. Julia supports long/short-form functions, where signatures, anonymous
+functions, macro/type/module definitions, macro wrappers and do blocks. Outside
+a definition, the current standalone expression or statement is sent. A control
+flow header selects the complete statement; its body selects the current item.
+Tree-sitter execution preserves indentation, blank lines and comments.
+
+Visual selections support characterwise, linewise and blockwise modes. Selected
+text is sent without removing indentation, tabs, trailing spaces, blank lines
+or comments. Tabs cut by a block follow native Neovim yank behavior. Registers
+and clipboard settings are restored after extraction. Selection commands do
+not jump, regardless of the jump option.
+
+A new terminal uses languages[filetype].start_cmd if configured. Unconfigured
+filetypes use the default shell for selection sending, not the Python REPL.
+Existing terminals are reused without checking which interpreter is running;
+use separate terminal ids for different languages. The receiving interpreter
+must support the submitted code; selection sending does not compile it.
 
 ==============================================================================
 2. Requirements                                      *coderunner-requirements*
 
 - Neovim 0.8+
 - toggleterm.nvim
-- A Python Tree-sitter parser for |:RunCurrentLine|
+- A Python or Julia Tree-sitter parser for |:RunCurrentLine|
+- The configured interpreter executable in Neovim's environment
+
+Cell and visual selection commands do not require a Tree-sitter parser.
 
 ==============================================================================
 3. Commands                                              *coderunner-commands*
@@ -51,6 +77,17 @@ current statement is sent, including multi-line statements.
 :RunCurrentLine [args]
         Alias of |:CodeRunCurrentLine|.
 
+                                                        *:CodeRunSelection*
+:'<,'>CodeRunSelection [args]
+        Send the visual selection to toggleterm, preserving whitespace.
+        Works in all filetypes, even outside enabled_filetypes.
+        Supports v, V and CTRL-V selections and preserves selected columns.
+        Without a range, uses the live or most recent visual selection in the
+        current buffer. Explicit ranges (e.g. :2,5CodeRunSelection) send complete
+        lines unless they match the most recent visual marks, in which case
+        that selection is used. Whitespace-only selections are not sent.
+        The jump option is ignored.
+
 Arguments are whitespace-separated:
 >
   1, 2, term=2     target toggleterm id
@@ -64,6 +101,7 @@ Examples:
   :CodeRunBlock hide nojump
   :CodeRunBlock term=2 show=false jump=false
   :RunCurrentLine term=2 show nojump
+  :'<,'>CodeRunSelection term=2 show
 <
 
 ==============================================================================
@@ -119,12 +157,27 @@ CodeRunner does not create keymaps internally. Use Neovim's normal keymap API:
   end, {
     desc = "Run current Tree-sitter item in background",
   })
+
+  vim.keymap.set("x", "<leader>rs", function()
+    require("coderunner").run_selection("show term=2")
+  end, {
+    desc = "Send selected code",
+  })
 <
 
 Lua helpers accept the same argument string as commands:
 >
   require("coderunner").run_block("hide nojump")
   require("coderunner").run_line("term=2 show jump")
+  require("coderunner").run_selection("term=2 show")
+<
+
+The lower-level send_selection helper also accepts an options table:
+>
+  require("coderunner").send_selection({
+    term_id = 2,
+    show_terminal = true,
+  })
 <
 
 vim:tw=78:ts=8:noet:ft=help:norl:
