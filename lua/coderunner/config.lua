@@ -8,10 +8,13 @@ M.defaults = {
   notify = true,
   enabled_filetypes = { "python" },
   workspace = {
-    width = 52,
+    width = 60,
     position = "right",
     timeout = 15000,
+    auto_refresh = true,
+    refresh_delay = 150,
     max_items = 500,
+    max_children = 100,
     preview_length = 120,
   },
   languages = {

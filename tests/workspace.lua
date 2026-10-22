@@ -14,24 +14,27 @@ local function hex(text)
     return ("%02x"):format(byte:byte())
   end))
 end
-local function frame(id, variables, truncated)
-  local lines = { "BEGIN\t" .. id }
+local function frame(id, variables, truncated, generation)
+  local lines = { "BEGIN\t" .. id .. "\t" .. (generation or 1) }
   for _, variable in ipairs(variables) do
     local fields = { "VAR", tostring(id) }
     for _, key in ipairs({ "name", "type", "dimensions", "value" }) do
       table.insert(fields, hex(variable[key] or ""))
     end
+    table.insert(fields, tostring(variable.id or 0))
+    table.insert(fields, variable.expandable and "1" or "0")
     table.insert(lines, table.concat(fields, "\t"))
   end
   table.insert(lines, "END\t" .. id .. "\t" .. (truncated and "1" or "0"))
   return table.concat(lines, "\n") .. "\n"
 end
-local function connect(term, token)
+local function connect(term, token, version)
   local peer = uv.new_tcp()
   table.insert(peers, peer)
   peer:connect("127.0.0.1", term.port, function(err)
     assert(not err, err)
-    peer:write("HELLO\t" .. (token or term.token) .. "\t1\n")
+    local hello = "HELLO\t" .. (token or term.token) .. "\t" .. (version or 2)
+    peer:write(hello .. (version == 1 and "\n" or "\t1\n"))
     local buffer = ""
     peer:read_start(function(read_err, data)
       assert(not read_err, read_err)
@@ -46,11 +49,12 @@ local function connect(term, token)
         end
         local request = buffer:sub(1, newline - 1)
         buffer = buffer:sub(newline + 1)
-        local id = tonumber(request:match("^REFRESH\t(%d+)"))
-        assert(id, request)
+        local kind, number = request:match("^(%u+)\t(%d+)")
+        local id = tonumber(number)
+        assert(id and (kind == "REFRESH" or kind == "CHILDREN"), request)
         term.requests = (term.requests or 0) + 1
         if responder then
-          responder(peer, id, term)
+          responder(peer, id, term, vim.split(request, "\t", { plain = true }))
         else
           peer:write(frame(id, { { name = "answer", type = "Int64", value = "42" } }))
         end
@@ -139,7 +143,8 @@ test("starts Julia lazily, renders read-only sidebar and preserves focus", funct
   assert(vim.bo[workspace.buffer].modifiable == false)
   assert(vim.bo[workspace.buffer].buftype == "nofile")
   local lines = table.concat(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false), "\n")
-  assert(lines:find("answer :: Int64", 1, true))
+  assert(lines:find("answer", 1, true) and lines:find("Int64", 1, true))
+  assert(lines:find("VARIABLE", 1, true) and lines:find("VALUE / SIZE", 1, true))
   assert(workspace.command("toggle", "term=21"))
   assert(not workspace.window)
   assert(state.authenticated, "Closing the panel must not kill the REPL connection")
@@ -305,6 +310,223 @@ test("connection timeout closes resources and marks the session disconnected", f
     return state.status == "disconnected"
   end)
   assert(not state.server and not state.client and not state.timer)
+end)
+
+test("execution notifications debounce and respect manual mode", function()
+  config.options.workspace.refresh_delay = 30
+  assert(workspace.open({ term_id = 40 }))
+  local state = ready(40)
+  responder = function(peer, id)
+    peer:write(frame(id, { { name = "answer", type = "Int64", value = "99" } }))
+  end
+  terminals[40].peer:write(string.rep("CHANGED\n", 12))
+  wait_for(function()
+    return state.sequence == 2 and state.status == "ready"
+  end)
+  assert(terminals[40].requests == 2)
+  assert(state.variables[1].value == "99")
+  config.options.workspace.auto_refresh = false
+  terminals[40].peer:write("CHANGED\n")
+  vim.wait(70, function()
+    return false
+  end, 5)
+  assert(state.sequence == 2)
+end)
+
+test("an execution finishing during a request triggers one subsequent refresh", function()
+  config.options.workspace.refresh_delay = 20
+  assert(workspace.open({ term_id = 41 }))
+  local state = ready(41)
+  local held
+  responder = function(peer, id)
+    if id == 2 then
+      held = function()
+        peer:write(frame(id, { { name = "answer", type = "Int64", value = "50" } }))
+      end
+    else
+      peer:write(frame(id, { { name = "answer", type = "Int64", value = "99" } }))
+    end
+  end
+  assert(workspace.refresh({ term_id = 41 }))
+  wait_for(function()
+    return held ~= nil
+  end)
+  terminals[41].peer:write("CHANGED\n")
+  wait_for(function()
+    return state.dirty
+  end)
+  held()
+  wait_for(function()
+    return state.sequence == 3 and state.status == "ready"
+  end)
+  assert(state.variables[1].value == "99")
+  assert(terminals[41].requests == 3)
+end)
+
+test("nested trees load lazily and preserve expansion and selection after refresh", function()
+  local generation, city = 0, "Paris"
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      generation = generation + 1
+      peer:write(
+        frame(
+          id,
+          { { name = "person", type = "Person", value = "2 fields", id = 1, expandable = true } },
+          false,
+          generation
+        )
+      )
+    elseif fields[4] == "1" then
+      peer:write(frame(id, {
+        { name = "name", type = "String", value = '"Ada"' },
+        { name = "address", type = "Address", value = "1 field", id = 2, expandable = true },
+      }, false, generation))
+    else
+      peer:write(frame(id, { { name = "city", type = "String", value = city } }, false, generation))
+    end
+  end
+  assert(workspace.open({ term_id = 42 }))
+  local state = ready(42)
+  local root = state.variables[1]
+  assert(not root.children and terminals[42].requests == 1)
+  assert(sessions.expand(42, root, true))
+  wait_for(function()
+    return root.children ~= nil
+  end)
+  local address = root.children[2]
+  assert(sessions.expand(42, address, true))
+  wait_for(function()
+    return address.children ~= nil
+  end)
+  local path = address.children[1].path
+  for line, text in ipairs(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false)) do
+    if text:find("city", 1, true) then
+      vim.api.nvim_win_set_cursor(workspace.window, { line, 0 })
+    end
+  end
+  workspace.render()
+  city = "London"
+  assert(workspace.refresh({ term_id = 42 }))
+  wait_for(function()
+    local item = state.variables[1]
+    return state.status == "ready" and item.children and item.children[2].children ~= nil
+  end)
+  root = state.variables[1]
+  assert(root.children[2].children[1].value == "London")
+  assert(state.expanded[root.path] and state.expanded[root.children[2].path])
+  assert(workspace.preferred_path == path, vim.inspect(workspace.preferred_path))
+  local line = vim.api.nvim_win_get_cursor(workspace.window)[1]
+  assert(vim.api.nvim_buf_get_lines(workspace.buffer, line - 1, line, false)[1]:find("city", 1, true))
+  local requests = terminals[42].requests
+  assert(sessions.expand(42, root, false))
+  assert(sessions.expand(42, root, true))
+  assert(terminals[42].requests == requests, "Collapsing must retain loaded children")
+end)
+
+test("refresh preserves the viewport of a deeply scrolled field list", function()
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, { { name = "object", type = "Object", value = "60 fields", id = 1, expandable = true } }))
+    else
+      local fields = {}
+      for index = 1, 60 do
+        fields[index] = { name = "field" .. index, type = "Int64", value = tostring(index) }
+      end
+      peer:write(frame(id, fields))
+    end
+  end
+  assert(workspace.open({ term_id = 47 }))
+  local state = ready(47)
+  assert(sessions.expand(47, state.variables[1], true))
+  wait_for(function()
+    return state.variables[1].children ~= nil
+  end)
+  for line, text in ipairs(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false)) do
+    if text:find("field45", 1, true) then
+      vim.api.nvim_win_set_cursor(workspace.window, { line, 0 })
+    end
+  end
+  vim.api.nvim_win_call(workspace.window, function()
+    vim.cmd("normal! zz")
+  end)
+  workspace.render()
+  local before = vim.api.nvim_win_call(workspace.window, vim.fn.winsaveview)
+  assert(workspace.refresh({ term_id = 47 }))
+  wait_for(function()
+    return state.status == "ready" and state.variables[1].children ~= nil
+  end)
+  local after = vim.api.nvim_win_call(workspace.window, vim.fn.winsaveview)
+  assert(before.lnum == after.lnum)
+  assert(before.topline == after.topline, vim.inspect({ before = before, after = after }))
+end)
+
+test("child failures are displayed without an infinite expansion retry", function()
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, { { name = "object", type = "Object", value = "1 field", id = 1, expandable = true } }))
+    else
+      peer:write("ERROR\t" .. id .. "\t" .. hex("Object changed") .. "\n")
+    end
+  end
+  assert(workspace.open({ term_id = 43 }))
+  local state = ready(43)
+  local root = state.variables[1]
+  assert(sessions.expand(43, root, true))
+  wait_for(function()
+    return root.error ~= nil
+  end)
+  assert(root.error == "Object changed")
+  assert(not state.pending)
+  assert(terminals[43].requests == 2)
+end)
+
+test("outdated helpers report the required Julia restart", function()
+  auto_connect = false
+  assert(workspace.open({ term_id = 45 }))
+  local state = sessions.sessions[45]
+  connect(terminals[45], nil, 1)
+  wait_for(function()
+    return state.status == "disconnected"
+  end)
+  assert(state.message:find("restart Julia", 1, true))
+end)
+
+test("disconnect cancels a debounced automatic update", function()
+  config.options.workspace.refresh_delay = 100
+  assert(workspace.open({ term_id = 46 }))
+  local state = ready(46)
+  terminals[46].peer:write("CHANGED\n")
+  wait_for(function()
+    return state.auto_timer ~= nil
+  end)
+  sessions.disconnect(46)
+  assert(not state.auto_timer and not state.client)
+  assert(state.status == "disconnected")
+end)
+
+test("narrow and wide panels clip by display width and keep fields aligned", function()
+  assert(workspace.open({ term_id = 44 }))
+  ready(44)
+  for _, width in ipairs({ 28, 48, 72 }) do
+    vim.api.nvim_win_set_width(workspace.window, width)
+    workspace.render()
+    local actual = vim.api.nvim_win_get_width(workspace.window)
+    for _, line in ipairs(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false)) do
+      assert(vim.fn.strdisplaywidth(line) < actual)
+    end
+  end
+end)
+
+test("closing the last normal window leaves a usable editor buffer", function()
+  assert(workspace.open({ term_id = 48 }))
+  ready(48)
+  vim.api.nvim_set_current_win(workspace.window)
+  vim.cmd("only")
+  workspace.inspect()
+  workspace.close()
+  assert(not workspace.window)
+  assert(vim.api.nvim_get_current_buf() ~= workspace.buffer)
+  assert(vim.bo.buftype == "")
 end)
 
 print(("\nWorkspace: %d passed, %d failed"):format(passed, failed))

@@ -140,19 +140,42 @@ remote SSH session, or a partially entered Julia expression. The helper is
 loaded into that exact process, so existing variables are available without
 restarting Julia. Each terminal has an independent connection and snapshot.
 
-The sidebar shows global variables defined in `Main`: name, type, dimensions
-for built-in arrays, and a bounded value preview. Internal names, modules and
-explicitly imported bindings are excluded. Scalars, strings, built-in arrays
-and dictionaries have conservative previews; custom objects show
-`<preview omitted>` instead of invoking arbitrary display or property methods.
-Array previews show the first six elements in Julia's linear (column-major)
-order. This version does not include tree expansion, table viewers, function
-locals, or automatic refresh after evaluation.
+The sidebar displays `Main`'s globals in a compact variable / value / type tree.
+Built-in array sizes are shown with their previews. Internal names, modules and
+explicitly imported bindings are excluded. Wide panels use aligned columns;
+narrow panels prioritize variable names and values. `K` always shows the full
+bounded summary, including the type.
 
-- `r` in the sidebar or `:CodeRunWorkspaceRefresh`: request a new snapshot.
-- `<CR>` on a variable: show its summary without the sidebar's width truncation.
+**Automatic refresh** is enabled by default. A Julia REPL integration sends an
+event after each expression finishes, including expressions that throw. This
+covers CodeRunner's line, block and selection commands as well as code typed
+directly into the REPL. Bursts are debounced, and updates arriving during a
+request trigger a subsequent snapshot. There is no polling and no completion
+code appended to the terminal input. Expression results, `ans`, top-level
+struct definitions and REPL soft scope are preserved. Background tasks that
+mutate objects after the REPL expression has returned do not independently
+trigger refresh; use `r` in that case.
+
+**Tree browsing** reads struct fields, nested structs, tuples, named tuples and
+built-in array elements on demand. Struct children mean instance fields, not a
+subtype hierarchy. It uses `getfield`, not user-defined `getproperty` or `show`.
+Uninitialized fields show `#undef`; circular references and depth/node limits
+are marked instead of recursively traversed. Expansions are retained across
+refreshes, while object references and loaded children are rebuilt for the new
+snapshot. The selected field and scroll position are preserved when possible.
+Each expansion shows at most `max_children` entries, with an omitted-items
+marker for larger objects. Dictionary previews remain summaries rather than
+expandable key/value views.
+
+- `r` or `:CodeRunWorkspaceRefresh`: refresh immediately.
+- `<CR>` / `<Space>`: expand or collapse an object; inspect a leaf.
+- `l` / `<Right>`: expand or move to the first child.
+- `h` / `<Left>`: collapse or move to the parent.
+- `K`: inspect the selected node without the sidebar's width truncation.
 - `q`: close the sidebar without stopping Julia or disconnecting.
 - `:CodeRunWorkspaceDisconnect`: disconnect without stopping Julia.
+
+Table viewers and function-local debugging are not included.
 
 Refresh and disconnect commands also accept `term=N`. A disconnected process
 can be reattached with `:CodeRunWorkspaceRefresh term=N attach`. Connections
@@ -162,11 +185,18 @@ After a process exits or is replaced, confirm the new Julia REPL with `attach`.
 A long calculation that does not yield can delay a refresh; a timeout does not
 interrupt Julia or cancel user code.
 
-Workspace uses Julia's `Sockets` standard library and an authenticated local
-loopback connection. No Julia packages are installed, project files are not
-changed, and variable data is not parsed from terminal output. Nothing is
-loaded into Julia until a workspace command requests a connection. It has been
-integration-tested with Julia 1.12.6; remote processes are not supported yet.
+Workspace uses Julia's `Sockets` and `REPL` standard libraries and an
+authenticated local loopback connection. No Julia packages are installed,
+project files are not changed, and variable data is not parsed from terminal
+output. Nothing is loaded into Julia until a workspace command requests a
+connection. The REPL hook is installed once and becomes a no-op after
+disconnection. If a REPL does not support the hook, the sidebar displays
+`Manual` and manual refresh remains available. Integration-tested with Julia
+1.12.6; remote processes are not supported yet.
+
+When upgrading from the original Workspace version, restart the Julia process
+as well as Neovim: the helper protocol has changed. An old helper is rejected
+with a restart message rather than silently reusing incompatible objects.
 
 Optional settings (shown with defaults):
 
@@ -174,10 +204,13 @@ Optional settings (shown with defaults):
 require("coderunner").setup({
   enabled_filetypes = { "python", "julia" },
   workspace = {
-    width = 52,             -- 24..200 columns
+    width = 60,             -- 24..200; initially capped at half the screen
     position = "right",     -- "left" or "right"
     timeout = 15000,        -- 100..120000 milliseconds
+    auto_refresh = true,   -- REPL execution-completion events
+    refresh_delay = 150,   -- 0..5000 ms debounce
     max_items = 500,        -- 1..2000 variables; '+' indicates truncation
+    max_children = 100,    -- 1..500 fields/elements per expansion
     preview_length = 120,  -- 16..512 characters, plus truncation marker
   },
 })
@@ -268,8 +301,9 @@ with simulated Julia peers, without requiring Julia or toggleterm.
 socket protocol using Julia's standard libraries only.
 
 `make test-integration` additionally exercises a real Julia REPL and shell,
-including workspace startup, same-process snapshots, refresh, reconnection,
-process isolation and terminal exit. It
+including workspace startup, same-process snapshots, execution-completion
+refresh (plugin and manual input), errors, REPL semantics, nested struct
+updates, reconnection, process isolation and terminal exit. It
 requires Julia, the parsers, and an installed toggleterm.nvim. Set
 `TOGGLETERM_RTP=/path/to/toggleterm.nvim` if the plugin is not under
 `stdpath("data")/site/pack/core/opt/toggleterm.nvim`.

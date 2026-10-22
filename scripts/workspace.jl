@@ -1,17 +1,50 @@
 module CodeRunnerWorkspace
 
 using Sockets
+using REPL
 
+const PROTOCOL_VERSION = 2
 const CONNECTION = Ref{Union{Nothing,TCPSocket}}(nothing)
+const WRITE_LOCK = ReentrantLock()
+const CHANGE_PENDING = Ref{Union{Nothing,TCPSocket}}(nothing)
+const CHANGE_VERSION = Ref(0)
+const MAX_DEPTH = 8
+const MAX_NODES = 10000
 const SCALAR_TYPES = (Bool, Int8, Int16, Int32, Int64, Int128, UInt8, UInt16,
     UInt32, UInt64, UInt128, Float16, Float32, Float64, Char, Symbol, Nothing, Missing)
 
+struct UndefinedField end
+const UNDEFINED = UndefinedField()
+const Item = Tuple{String,String,String,String,Int,Bool}
+
+struct Node
+    value::Any
+    ancestors::Vector{Any}
+end
+
+mutable struct Store
+    generation::Int
+    next_id::Int
+    nodes::Dict{Int,Node}
+    children::Dict{Int,Tuple{Vector{Item},Bool}}
+end
+Store() = Store(0, 0, Dict{Int,Node}(), Dict{Int,Tuple{Vector{Item},Bool}}())
+
 clip(text::String, limit::Int) = length(text) > limit ? first(text, limit) * "..." : text
 
-# Only inspect built-in containers and scalars: arbitrary show/getproperty methods
-# can run user code, allocate unbounded output, or block the REPL.
+# Raw fields and built-in containers only: never call custom show/getproperty.
+function expandable(value)
+    (value isa UndefinedField || value isa AbstractString || value isa Symbol ||
+        value isa Type || value isa Function || value isa Module || value isa Dict ||
+        value isa Task || value isa IO || typeof(value) in SCALAR_TYPES) && return false
+    (value isa Array || value isa BitArray) && return !isempty(value)
+    return isstructtype(typeof(value)) && fieldcount(typeof(value)) > 0
+end
+
 function preview(value, limit::Int)
-    if value isa String || value isa SubString{String}
+    if value isa UndefinedField
+        return "#undef"
+    elseif value isa String || value isa SubString{String}
         return clip(repr(first(value, limit)), limit)
     elseif typeof(value) in SCALAR_TYPES
         return clip(repr(value), limit)
@@ -30,6 +63,9 @@ function preview(value, limit::Int)
         return "<module>"
     elseif value isa Type
         return "<type>"
+    elseif expandable(value)
+        count = fieldcount(typeof(value))
+        return string(count, count == 1 ? " field" : " fields")
     else
         return "<preview omitted>"
     end
@@ -42,18 +78,35 @@ function scalar_preview(value, limit)
     return "<" * clip(string(typeof(value)), limit) * ">"
 end
 
-function describe(name::Symbol, value, limit::Int)
-    dimensions = if value isa Array || value isa BitArray
-        join(size(value), " x ")
-    else
-        ""
-    end
-    return (clip(string(name), 512), clip(string(typeof(value)), 512),
-        clip(dimensions, 128), preview(value, limit))
+function describe(name, value, limit::Int)
+    dimensions = value isa Array || value isa BitArray ? join(size(value), " x ") : ""
+    type = value isa UndefinedField ? "" : clip(string(typeof(value)), 512)
+    return (clip(string(name), 512), type, clip(dimensions, 128), preview(value, limit))
 end
 
-function snapshot(max_items::Int, preview_length::Int)
-    rows = NTuple{4,String}[]
+function item(store::Store, name, value, limit::Int, ancestors=Any[])
+    description = Base.invokelatest(describe, name, value, limit)
+    can_expand = expandable(value)
+    if can_expand && any(parent -> parent === value, ancestors)
+        return (description[1:3]..., "<circular reference>", 0, false)
+    elseif can_expand && length(ancestors) >= MAX_DEPTH
+        return (description[1:3]..., "<maximum depth>", 0, false)
+    elseif can_expand && length(store.nodes) >= MAX_NODES
+        return (description[1:3]..., "<node limit>", 0, false)
+    elseif can_expand
+        store.next_id += 1
+        store.nodes[store.next_id] = Node(value, [ancestors; Any[value]])
+        return (description..., store.next_id, true)
+    end
+    return (description..., 0, false)
+end
+
+function snapshot(max_items::Int, preview_length::Int, store::Store=Store())
+    store.generation += 1
+    store.next_id = 0
+    empty!(store.nodes)
+    empty!(store.children)
+    rows = Item[]
     truncated = false
     for name in sort!(names(Main; all=true, imported=false); by=string)
         text = string(name)
@@ -67,45 +120,142 @@ function snapshot(max_items::Int, preview_length::Int)
             break
         end
         row = try
-            Base.invokelatest(describe, name, value, preview_length)
+            item(store, name, value, preview_length)
         catch
-            (clip(text, 512), "<unavailable>", "", "<inspection failed>")
+            (clip(text, 512), "<unavailable>", "", "<inspection failed>", 0, false)
         end
         push!(rows, row)
     end
     return rows, truncated
 end
 
-# Protocol v1: LF-delimited, tab-separated records. All text fields are UTF-8
-# encoded as hex using bytes2hex; no Julia serialization or eval crosses IPC.
-function serve(socket::TCPSocket, token::String)
+function children(store::Store, generation::Int, id::Int, limit::Int, preview_length::Int)
+    generation == store.generation || error("Workspace changed; refresh before expanding")
+    haskey(store.nodes, id) || error("Object is no longer available")
+    haskey(store.children, id) && return store.children[id]
+    node = store.nodes[id]
+    value = node.value
+    array = value isa Array || value isa BitArray
+    count = array ? length(value) : fieldcount(typeof(value))
+    rows = Item[]
+    for index in 1:min(count, limit)
+        name = array ? "[$index]" : string(fieldname(typeof(value), index))
+        child = if array
+            isassigned(value, index) ? value[index] : UNDEFINED
+        else
+            isdefined(value, index) ? getfield(value, index) : UNDEFINED
+        end
+        push!(rows, item(store, name, child, preview_length, node.ancestors))
+    end
+    result = (rows, count > limit)
+    store.children[id] = result
+    return result
+end
+
+# Send notifications separately, so a closed or slow editor cannot change the
+# result or exception of the user's evaluation. Serialize writes with replies.
+function changed()
+    socket = CONNECTION[]
+    socket === nothing && return nothing
+    CHANGE_VERSION[] += 1
+    CHANGE_PENDING[] === socket && return nothing
+    CHANGE_PENDING[] = socket
+    @async try
+        while CONNECTION[] === socket && isopen(socket)
+            version = CHANGE_VERSION[]
+            lock(WRITE_LOCK) do
+                if CONNECTION[] === socket && isopen(socket)
+                    println(socket, "CHANGED")
+                    flush(socket)
+                end
+            end
+            # An evaluation can finish while the write yields. Do not lose
+            # that final update just because a notification was in flight.
+            version == CHANGE_VERSION[] && break
+        end
+    catch
+    finally
+        CHANGE_PENDING[] === socket && (CHANGE_PENDING[] = nothing)
+    end
+    return nothing
+end
+
+function evaluate(mod::Module, ast)
     try
-        println(socket, "HELLO\t", token, "\t1")
+        # Julia 1.12's entry point preserves package-install hooks and top-level
+        # lowering. Older REPLs evaluate the already-softscoped AST directly.
+        if isdefined(REPL, :toplevel_eval_with_hooks)
+            return Base.invokelatest(REPL.toplevel_eval_with_hooks, mod, ast)
+        end
+        return Core.eval(mod, ast)
+    finally
+        changed()
+    end
+end
+
+function transform(ast)
+    CONNECTION[] === nothing && return ast
+    mod = isdefined(Base, :active_module) ? Base.active_module() : Main
+    return Expr(:call, GlobalRef(CodeRunnerWorkspace, :evaluate), QuoteNode(mod), QuoteNode(ast))
+end
+
+function install_hook()
+    isdefined(Base, :active_repl_backend) || return false
+    backend = Base.active_repl_backend
+    hasproperty(backend, :ast_transforms) || return false
+    transforms = backend.ast_transforms
+    any(hook -> hook === transform, transforms) || push!(transforms, transform)
+    return true
+end
+
+function reply(socket, id, store, rows, truncated)
+    lock(WRITE_LOCK) do
+        println(socket, "BEGIN\t", id, '\t', store.generation)
+        for row in rows
+            text = join(bytes2hex.(codeunits.(row[1:4])), '\t')
+            println(socket, "VAR\t", id, '\t', text, '\t', row[5], '\t', row[6] ? "1" : "0")
+        end
+        println(socket, "END\t", id, '\t', truncated ? "1" : "0")
+        flush(socket)
+    end
+end
+
+# v2: LF/tab records, hex UTF-8 text, generation-scoped opaque object ids.
+# Requests never carry expressions, property paths, or serialized Julia values.
+function serve(socket::TCPSocket, token::String, hooked::Bool)
+    store = Store()
+    try
+        println(socket, "HELLO\t", token, "\t2\t", hooked ? "1" : "0")
         flush(socket)
         while isopen(socket) && !eof(socket)
             request = readline(socket)
             ncodeunits(request) <= 256 || break
             fields = split(request, '\t')
-            length(fields) == 4 && fields[1] == "REFRESH" || break
-            id = tryparse(Int, fields[2])
-            max_items = tryparse(Int, fields[3])
-            preview_length = tryparse(Int, fields[4])
-            (id !== nothing && max_items !== nothing && preview_length !== nothing) || break
-            (id > 0 && 1 <= max_items <= 2000 && 16 <= preview_length <= 512) || break
+            length(fields) in (4, 6) || break
+            numbers = tryparse.(Int, fields[2:end])
+            all(number -> number !== nothing && number > 0, numbers) || break
+            id = numbers[1]
+            limit, preview_length = numbers[end-1:end]
+            (1 <= limit <= 2000 && 16 <= preview_length <= 512) || break
             try
-                rows, truncated = Base.invokelatest(snapshot, max_items, preview_length)
-                println(socket, "BEGIN\t", id)
-                for row in rows
-                    println(socket, "VAR\t", id, '\t', join(bytes2hex.(codeunits.(row)), '\t'))
+                rows, truncated = if fields[1] == "REFRESH" && length(fields) == 4
+                    # In Julia 1.12, newly created global bindings also have a
+                    # world age. The long-lived socket task must see the latest.
+                    Base.invokelatest(snapshot, limit, preview_length, store)
+                elseif fields[1] == "CHILDREN" && length(fields) == 6 && limit <= 500
+                    Base.invokelatest(children, store, numbers[2], numbers[3], limit, preview_length)
+                else
+                    break
                 end
-                println(socket, "END\t", id, '\t', truncated ? "1" : "0")
+                reply(socket, id, store, rows, truncated)
             catch
-                println(socket, "ERROR\t", id, '\t', bytes2hex(codeunits("Unable to inspect Main")))
+                lock(WRITE_LOCK) do
+                    println(socket, "ERROR\t", id, '\t', bytes2hex(codeunits("Object changed or inspection failed; refresh to retry")))
+                    flush(socket)
+                end
             end
-            flush(socket)
         end
     catch err
-        # The editor may close the connection on timeout or exit.
         @debug "Workspace connection stopped" exception=(err, catch_backtrace())
     finally
         isopen(socket) && close(socket)
@@ -118,7 +268,8 @@ function start(port::Integer, token::String)
     previous !== nothing && isopen(previous) && close(previous)
     socket = connect(ip"127.0.0.1", port)
     CONNECTION[] = socket
-    errormonitor(@async serve(socket, token))
+    hooked = install_hook()
+    errormonitor(@async serve(socket, token, hooked))
     return nothing
 end
 

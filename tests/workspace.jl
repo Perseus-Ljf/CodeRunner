@@ -42,16 +42,107 @@ workspace_test_unsafe = UnsafeDisplay()
     @test truncated
 end
 
+struct WorkspaceAddress
+    city::String
+    zip::Int
+end
+mutable struct WorkspacePerson
+    name::String
+    address::WorkspaceAddress
+    values::Vector{Int}
+end
+Base.getproperty(::WorkspacePerson, ::Symbol) = error("No custom property access")
+Base.show(::IO, ::WorkspacePerson) = error("No custom display")
+mutable struct WorkspaceLink
+    child::Any
+    WorkspaceLink() = new()
+    WorkspaceLink(child) = new(child)
+end
+
+@testset "Raw-field trees" begin
+    person = WorkspacePerson("Ada", WorkspaceAddress("Paris", 75001), collect(1:10))
+    store = CodeRunnerWorkspace.Store()
+    store.generation = 1
+    root = CodeRunnerWorkspace.item(store, "person", person, 120)
+    @test root[4] == "3 fields"
+    @test root[6]
+    fields, truncated = CodeRunnerWorkspace.children(store, 1, root[5], 100, 120)
+    @test !truncated
+    @test first.(fields) == ["name", "address", "values"]
+    @test fields[1][4] == repr("Ada")
+    address, _ = CodeRunnerWorkspace.children(store, 1, fields[2][5], 100, 120)
+    @test address[1][4] == repr("Paris")
+    @test address[2][4] == "75001"
+    array, truncated = CodeRunnerWorkspace.children(store, 1, fields[3][5], 2, 120)
+    @test truncated
+    @test first.(array) == ["[1]", "[2]"]
+    @test array[2][4] == "2"
+    @test CodeRunnerWorkspace.children(store, 1, root[5], 100, 120)[1] === fields
+
+    tuple = CodeRunnerWorkspace.item(store, "pair", (left=3, right="four"), 120)
+    pair, _ = CodeRunnerWorkspace.children(store, 1, tuple[5], 100, 120)
+    @test first.(pair) == ["left", "right"]
+    @test pair[1][4] == "3"
+    unassigned = CodeRunnerWorkspace.item(store, "unassigned", Vector{String}(undef, 2), 120)
+    slots, _ = CodeRunnerWorkspace.children(store, 1, unassigned[5], 100, 120)
+    @test all(row -> row[4] == "#undef" && !row[6], slots)
+
+    link = WorkspaceLink()
+    undef_root = CodeRunnerWorkspace.item(store, "link", link, 120)
+    fields, _ = CodeRunnerWorkspace.children(store, 1, undef_root[5], 100, 120)
+    @test fields[1][4] == "#undef"
+    link.child = link
+    cyclic = CodeRunnerWorkspace.item(store, "cycle", link, 120)
+    fields, _ = CodeRunnerWorkspace.children(store, 1, cyclic[5], 100, 120)
+    @test fields[1][4] == "<circular reference>"
+    @test !fields[1][6]
+
+    nested = WorkspaceLink(nothing)
+    for _ in 1:12
+        nested = WorkspaceLink(nested)
+    end
+    deep = CodeRunnerWorkspace.item(store, "deep", nested, 120)
+    while deep[6]
+        deep = CodeRunnerWorkspace.children(store, 1, deep[5], 100, 120)[1][1]
+    end
+    @test deep[4] == "<maximum depth>"
+    CodeRunnerWorkspace.snapshot(500, 120, store)
+    @test_throws ErrorException CodeRunnerWorkspace.children(store, 1, root[5], 100, 120)
+end
+
+@testset "REPL evaluation semantics" begin
+    probe = Module(:WorkspaceEvaluationProbe)
+    @test CodeRunnerWorkspace.evaluate(probe, :(value = 41)) == 41
+    @test CodeRunnerWorkspace.evaluate(probe, :(value + 1)) == 42
+    ast = CodeRunnerWorkspace.REPL.softscope(:(begin
+        total = 0
+        for i in 1:4
+            total += i
+        end
+        total
+    end))
+    @test CodeRunnerWorkspace.evaluate(probe, ast) == 10
+    CodeRunnerWorkspace.evaluate(probe, :(struct WrappedType; x::Int; end))
+    @test CodeRunnerWorkspace.evaluate(probe, :(WrappedType(7).x)) == 7
+    CodeRunnerWorkspace.evaluate(probe, :(macro double(x); :($(esc(x)) * 2); end))
+    @test CodeRunnerWorkspace.evaluate(probe, :(@double 3)) == 6
+    @test_throws ErrorException CodeRunnerWorkspace.evaluate(probe, :(begin
+        partial = 99
+        error("intentional")
+    end))
+    @test getfield(probe, :partial) == 99
+end
+
 @testset "IPC protocol" begin
     server = listen(ip"127.0.0.1", 0)
     peer = nothing
     try
         @test CodeRunnerWorkspace.start(getsockname(server)[2], "test-token") === nothing
         peer = accept(server)
-        @test readline(peer) == "HELLO\ttest-token\t1"
+        @test readline(peer) == "HELLO\ttest-token\t2\t0"
         println(peer, "REFRESH\t7\t500\t120")
         flush(peer)
-        @test readline(peer) == "BEGIN\t7"
+        @test readline(peer) == "BEGIN\t7\t1"
         values = Dict{String,Vector{String}}()
         while true
             record = split(readline(peer), '\t')

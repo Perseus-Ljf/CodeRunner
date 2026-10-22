@@ -114,6 +114,103 @@ local ok, err = xpcall(function()
   assert(values.workspace_scalar.value == "99")
   print("PASS Julia workspace: refresh reflects mutated REPL state")
 
+  local function variable(id, name)
+    for _, item in ipairs(sessions.sessions[id].variables) do
+      if item.name == name then
+        return item
+      end
+    end
+  end
+  local function await_value(id, name, expected)
+    assert(
+      vim.wait(15000, function()
+        local item = variable(id, name)
+        return item and item.value == expected and sessions.sessions[id].status == "ready"
+      end, 20),
+      "Missing automatic update for "
+        .. name
+        .. " ("
+        .. vim.inspect(variable(id, name))
+        .. "; "
+        .. sessions.sessions[id].status
+        .. "; "
+        .. tostring(sessions.sessions[id].message)
+        .. ")\n"
+        .. output(id)
+    )
+  end
+  assert(sessions.sessions[91].auto_supported)
+  buffer("julia", { "workspace_scalar = 101" })
+  runner.run_line("term=91 hide nojump")
+  await_value(91, "workspace_scalar", "101")
+  buffer("julia", { "# %%", "workspace_scalar = 102" })
+  runner.run_block("term=91 hide nojump")
+  await_value(91, "workspace_scalar", "102")
+  buffer("julia", { "workspace_scalar = 103" })
+  select_all("term=91 hide")
+  await_value(91, "workspace_scalar", "103")
+  print("PASS Julia workspace: line, block and selection automatically refresh")
+
+  local repl = terminal.get(91, true)
+  repl:send("workspace_scalar = 202", true)
+  await_value(91, "workspace_scalar", "202")
+  repl:send("41 + 1", true)
+  repl:send('println("ANS_RESULT_", ans)', true)
+  wait_for(91, "ANS_RESULT_42")
+  repl:send("begin\nworkspace_total = 0\nfor i in 1:4\nworkspace_total += i\nend\nend", true)
+  await_value(91, "workspace_total", "10")
+  repl:send('begin workspace_partial = 7; error("WORKSPACE_INTENTIONAL_ERROR") end;', true)
+  await_value(91, "workspace_partial", "7")
+  print("PASS Julia workspace: manual input, ans, soft scope and error completion")
+
+  repl:send(
+    'struct WorkspaceAddress; city::String; end; mutable struct WorkspacePerson; name::String; address::WorkspaceAddress; values::Vector{Int}; end; workspace_person = WorkspacePerson("Ada", WorkspaceAddress("Paris"), [1, 2, 3]);',
+    true
+  )
+  await_value(91, "workspace_person", "3 fields")
+  local person = variable(91, "workspace_person")
+  assert(person.expandable)
+  assert(sessions.expand(91, person, true))
+  assert(vim.wait(5000, function()
+    return person.children ~= nil
+  end, 20))
+  assert(person.children[1].name == "name" and person.children[1].value == '"Ada"')
+  local address = person.children[2]
+  assert(address.name == "address" and address.expandable)
+  assert(sessions.expand(91, address, true))
+  assert(vim.wait(5000, function()
+    return address.children ~= nil
+  end, 20))
+  assert(address.children[1].value == '"Paris"')
+  repl:send('workspace_person.address = WorkspaceAddress("Rome");', true)
+  assert(
+    vim.wait(15000, function()
+      local fresh = variable(91, "workspace_person")
+      local child = fresh and fresh.children and fresh.children[2]
+      return child and child.children and child.children[1].value == '"Rome"'
+    end, 20),
+    output(91)
+  )
+  print("PASS Julia workspace: real nested structs and expanded fields update automatically")
+
+  assert(vim.wait(5000, function()
+    return sessions.sessions[91].status == "ready"
+  end, 20))
+  local config = require("coderunner.config")
+  config.options.workspace.auto_refresh = false
+  local sequence = sessions.sessions[91].sequence
+  repl:send('workspace_scalar = 303; println("MANUAL_MODE_DONE")', true)
+  wait_for(91, "MANUAL_MODE_DONE")
+  vim.wait(400, function()
+    return false
+  end, 20)
+  assert(sessions.sessions[91].sequence == sequence)
+  assert(variable(91, "workspace_scalar").value == "202")
+  config.options.workspace.auto_refresh = true
+  assert(workspace.refresh({ term_id = 91 }))
+  await_value(91, "workspace_scalar", "303")
+  print("PASS Julia workspace: automatic refresh can be disabled")
+
   assert(not workspace.open({ term_id = 92 }))
   assert(not sessions.sessions[92], "Shell must not receive Julia bootstrap")
   workspace.close()
@@ -126,8 +223,13 @@ local ok, err = xpcall(function()
   sessions.disconnect(91)
   assert(workspace.open({ term_id = 91, attach = true }))
   values = snapshot(91)
-  assert(values.workspace_scalar.value == "99")
-  print("PASS Julia workspace: reconnect to an existing Julia process")
+  assert(values.workspace_scalar.value == "303")
+  repl:send(
+    'println("HOOK_COUNT_", count(h -> h === CodeRunnerWorkspace.transform, Base.active_repl_backend.ast_transforms))',
+    true
+  )
+  wait_for(91, "HOOK_COUNT_1")
+  print("PASS Julia workspace: reconnect to an existing Julia process without duplicate hooks")
   workspace.close()
   terminal.get(91, true):shutdown()
   assert(vim.wait(5000, function()

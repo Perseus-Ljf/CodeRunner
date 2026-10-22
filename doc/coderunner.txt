@@ -209,17 +209,37 @@ standard-library helper into that process over terminal input. Variables are
 returned over an authenticated loopback TCP connection, not terminal output.
 No Julia packages are installed and user project files are not modified.
 
-The sidebar shows Main's global variables, their types, built-in array sizes,
-and bounded previews. Modules, internal names and explicitly imported bindings
-are excluded. Custom display/property methods are not invoked; custom objects
-show <preview omitted>. Arrays preview the first six elements in column-major
-linear order. Function locals, tree expansion, table views, remote processes
-and automatic refresh are not implemented in this version.
+The sidebar shows Main's globals in an aligned variable/value/type tree,
+with compact name/value rows on narrow panels. Modules, internal names and
+explicitly imported bindings are excluded. Array previews show the first six
+elements in column-major linear order. Use K for a full bounded summary.
+
+Auto refresh is enabled by default. A REPL integration sends a completion
+event after each expression, even if it throws. Both CodeRunner submissions
+and manual REPL input are covered. Bursts are debounced; changes during an
+in-flight request schedule another snapshot. No polling or terminal completion
+markers are used. The integration preserves ans, results, soft scope and
+top-level definitions. If no supported REPL hook is available, the sidebar
+shows Manual. Background tasks mutating objects after their expression returns
+do not independently trigger refresh; use r to request another snapshot.
+
+Expand struct fields, nested objects, tuples/named tuples and built-in array
+elements on demand. Children mean instance fields, not subtypes. Raw getfield
+is used instead of custom getproperty/show. Uninitialized fields display
+#undef; cycles and depth/node limits are marked. Each node shows at most
+max_children entries, with an omission marker for larger objects. Dictionary
+previews remain summaries. References and loaded children are rebuilt on
+refresh, while expansion paths, selection and scrolling are retained when
+possible. Function-local debugging, table views and remote processes are not
+included.
 
 Sidebar mappings:
-  r           refresh
-  <CR>        view the selected variable's summary in a floating window
-  q           close the sidebar, keeping Julia and its connection alive
+  r               refresh immediately
+  <CR>, <Space>   expand/collapse an object; inspect a leaf
+  l, <Right>      expand or move to the first child
+  h, <Left>       collapse or move to the parent
+  K               inspect a summary in a floating window
+  q               close the sidebar, keeping Julia and its connection alive
 
 Connections and refreshes have a timeout; an unresponsive Julia process never
 blocks Neovim. Timeout/disconnect preserves the last complete snapshot with its
@@ -231,10 +251,13 @@ Optional configuration (defaults):
 >
   require("coderunner").setup({
     workspace = {
-      width = 52,             -- 24..200 columns
+      width = 60,             -- 24..200; initially at most half the screen
       position = "right",     -- "left" or "right"
       timeout = 15000,        -- 100..120000 milliseconds
+      auto_refresh = true,
+      refresh_delay = 150,   -- 0..5000 ms debounce
       max_items = 500,        -- 1..2000 variables
+      max_children = 100,    -- 1..500 fields/elements per expansion
       preview_length = 120,  -- 16..512 characters, plus truncation marker
     },
   })
@@ -242,6 +265,9 @@ Optional configuration (defaults):
 A '+' after the variable count indicates the snapshot reached max_items.
 Workspace commands do not require Tree-sitter or enabled_filetypes. Nothing
 is loaded into Julia until a workspace command requests a connection. Each
-terminal has an independent snapshot. Tested with Julia 1.12.6.
+terminal has an independent snapshot. Tested with Julia 1.12.6. The REPL hook
+is installed once and becomes a no-op after disconnection. When upgrading from
+the initial Workspace implementation, restart Julia as well as Neovim; the
+helper protocol has changed and incompatible helpers are rejected explicitly.
 
 vim:tw=78:ts=8:noet:ft=help:norl:
