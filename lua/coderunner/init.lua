@@ -224,6 +224,9 @@ local function send_lines(lines, opts, lang)
   if terminal.get(term_id, true) == nil then
     if lang.start_cmd and lang.start_cmd ~= "" then
       toggleterm.exec(lang.start_cmd, term_id, nil, nil, nil, nil, true, show_terminal)
+      if lang == config.options.languages.julia then
+        require("coderunner.julia_session").track(term_id, terminal.get(term_id, true))
+      end
     end
     vim.defer_fn(function()
       toggleterm.exec(code, term_id, nil, nil, nil, nil, true, show_terminal)
@@ -567,6 +570,23 @@ local function command_complete()
 end
 
 function M.register_commands()
+  for name, action in pairs({
+    CodeRunWorkspace = "toggle",
+    CodeRunWorkspaceRefresh = "refresh",
+    CodeRunWorkspaceDisconnect = "disconnect",
+  }) do
+    vim.api.nvim_create_user_command(name, function(opts)
+      require("coderunner.workspace").command(action, opts.args)
+    end, {
+      force = true,
+      nargs = "*",
+      complete = function()
+        return { "term=1", "term=2", "attach" }
+      end,
+      desc = "Julia workspace: " .. action,
+    })
+  end
+
   vim.api.nvim_create_user_command("CodeRunSelection", function(opts)
     local range = opts.range > 0 and { opts.line1, opts.line2 } or nil
     M.send_selection(parse_args(opts.args), range)

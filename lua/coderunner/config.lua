@@ -7,6 +7,13 @@ M.defaults = {
   jump = true,
   notify = true,
   enabled_filetypes = { "python" },
+  workspace = {
+    width = 52,
+    position = "right",
+    timeout = 15000,
+    max_items = 500,
+    preview_length = 120,
+  },
   languages = {
     python = {
       cell_marker = "^%s*# %%",

@@ -70,9 +70,73 @@ local ok, err = xpcall(function()
   select_all("term=92 hide")
   wait_for(92, "SHELL_RESULT_42")
   print("PASS real shell: visual selection for a filetype outside enabled_filetypes")
+
+  local workspace = require("coderunner.workspace")
+  local sessions = require("coderunner.julia_session")
+  buffer("julia", {
+    "workspace_scalar = 42",
+    "workspace_matrix = reshape(collect(1:6), 2, 3)",
+    'workspace_unicode = "' .. vim.fn.nr2char(20320) .. vim.fn.nr2char(22909) .. '"',
+    "workspace_undef = Vector{String}(undef, 2)",
+  })
+  select_all("term=91 hide")
+  assert(workspace.open({ term_id = 91 }))
+  local function snapshot(id)
+    assert(
+      vim.wait(30000, function()
+        local state = sessions.sessions[id]
+        return state and state.status == "ready"
+      end, 20),
+      vim.inspect(sessions.sessions[id]) .. "\n" .. output(id)
+    )
+    local values = {}
+    for _, item in ipairs(sessions.sessions[id].variables) do
+      values[item.name] = item
+    end
+    return values
+  end
+  local values = snapshot(91)
+  assert(values.workspace_scalar.value == "42", vim.inspect(values))
+  assert(values.workspace_matrix.dimensions == "2 x 3")
+  assert(values.workspace_matrix.type == "Matrix{Int64}")
+  assert(values.workspace_unicode.value:find(vim.fn.nr2char(20320), 1, true))
+  assert(values.workspace_undef.value == "[#undef, #undef]")
+  assert(not values.CodeRunnerWorkspace)
+  assert(vim.bo[workspace.buffer].modifiable == false)
+  assert(vim.b[workspace.buffer].coderunner_workspace_term == 91)
+  print("PASS Julia workspace: real same-process snapshot, dimensions, Unicode and undef")
+
+  buffer("julia", { "workspace_scalar = 99", 'println("WORKSPACE_CHANGED")' })
+  select_all("term=91 hide")
+  wait_for(91, "WORKSPACE_CHANGED")
+  assert(workspace.refresh({ term_id = 91 }))
+  values = snapshot(91)
+  assert(values.workspace_scalar.value == "99")
+  print("PASS Julia workspace: refresh reflects mutated REPL state")
+
+  assert(not workspace.open({ term_id = 92 }))
+  assert(not sessions.sessions[92], "Shell must not receive Julia bootstrap")
+  workspace.close()
+  assert(workspace.open({ term_id = 93 }))
+  values = snapshot(93)
+  assert(not values.workspace_scalar, "New Julia process must not inherit another workspace")
+  print("PASS Julia workspace: new process startup and terminal isolation")
+
+  workspace.close()
+  sessions.disconnect(91)
+  assert(workspace.open({ term_id = 91, attach = true }))
+  values = snapshot(91)
+  assert(values.workspace_scalar.value == "99")
+  print("PASS Julia workspace: reconnect to an existing Julia process")
+  workspace.close()
+  terminal.get(91, true):shutdown()
+  assert(vim.wait(5000, function()
+    return sessions.sessions[91].status == "disconnected"
+  end, 20))
+  print("PASS Julia workspace: terminal exit disconnects the session")
 end, debug.traceback)
 
-for _, id in ipairs({ 91, 92 }) do
+for _, id in ipairs({ 91, 92, 93 }) do
   local term = terminal.get(id, true)
   if term then
     term:shutdown()

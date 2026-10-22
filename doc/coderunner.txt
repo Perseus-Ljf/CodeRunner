@@ -8,6 +8,7 @@ CONTENTS                                                        *coderunner*
 3. Commands                                              |coderunner-commands|
 4. Configuration                                  |coderunner-configuration|
 5. Keymaps                                                |coderunner-keymaps|
+6. Julia Workspace                                      |coderunner-workspace|
 
 ==============================================================================
 1. Introduction                                      *coderunner-introduction*
@@ -179,5 +180,68 @@ The lower-level send_selection helper also accepts an options table:
     show_terminal = true,
   })
 <
+
+==============================================================================
+6. Julia Workspace                                      *coderunner-workspace*
+
+                                                        *:CodeRunWorkspace*
+:CodeRunWorkspace [term=N] [attach]
+        Toggle a read-only Julia workspace sidebar for the selected terminal.
+        Defaults to the configured term_id. Starts languages.julia.start_cmd
+        if the terminal does not exist. Julia terminals started by CodeRunner
+        in this Neovim session are recognized automatically. For an existing,
+        unrecognized Julia REPL, use attach to confirm the interpreter.
+
+                                                        *:CodeRunWorkspaceRefresh*
+:CodeRunWorkspaceRefresh [term=N] [attach]
+        Refresh the selected workspace, or the current sidebar's session if
+        no terminal is given. Use attach to reconnect to an existing Julia
+        process after disconnection or restart.
+
+                                                        *:CodeRunWorkspaceDisconnect*
+:CodeRunWorkspaceDisconnect [term=N]
+        Disconnect the current workspace without stopping Julia. The sidebar
+        keeps the last snapshot and displays its disconnected status.
+
+Use attach only with an idle, local Julia REPL, not a shell, another language,
+a remote SSH session, or a partially entered expression. CodeRunner loads a
+standard-library helper into that process over terminal input. Variables are
+returned over an authenticated loopback TCP connection, not terminal output.
+No Julia packages are installed and user project files are not modified.
+
+The sidebar shows Main's global variables, their types, built-in array sizes,
+and bounded previews. Modules, internal names and explicitly imported bindings
+are excluded. Custom display/property methods are not invoked; custom objects
+show <preview omitted>. Arrays preview the first six elements in column-major
+linear order. Function locals, tree expansion, table views, remote processes
+and automatic refresh are not implemented in this version.
+
+Sidebar mappings:
+  r           refresh
+  <CR>        view the selected variable's summary in a floating window
+  q           close the sidebar, keeping Julia and its connection alive
+
+Connections and refreshes have a timeout; an unresponsive Julia process never
+blocks Neovim. Timeout/disconnect preserves the last complete snapshot with its
+status and timestamp. Refresh may be delayed during a long non-yielding Julia
+calculation; a timeout does not cancel or interrupt Julia code. Confirm the
+interpreter again with attach after process exit or replacement.
+
+Optional configuration (defaults):
+>
+  require("coderunner").setup({
+    workspace = {
+      width = 52,             -- 24..200 columns
+      position = "right",     -- "left" or "right"
+      timeout = 15000,        -- 100..120000 milliseconds
+      max_items = 500,        -- 1..2000 variables
+      preview_length = 120,  -- 16..512 characters, plus truncation marker
+    },
+  })
+<
+A '+' after the variable count indicates the snapshot reached max_items.
+Workspace commands do not require Tree-sitter or enabled_filetypes. Nothing
+is loaded into Julia until a workspace command requests a connection. Each
+terminal has an independent snapshot. Tested with Julia 1.12.6.
 
 vim:tw=78:ts=8:noet:ft=help:norl:
