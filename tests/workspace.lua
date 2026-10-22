@@ -423,6 +423,68 @@ test("nested trees load lazily and preserve expansion and selection after refres
   assert(terminals[42].requests == requests, "Collapsing must retain loaded children")
 end)
 
+test("expansion emits only pending and completed states and reuses loaded children", function()
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, { { name = "object", type = "Object", value = "1 field", id = 1, expandable = true } }))
+    else
+      peer:write(frame(id, { { name = "field", type = "Int64", value = "42" } }))
+    end
+  end
+  assert(workspace.open({ term_id = 49 }))
+  local state = ready(49)
+  local root = state.variables[1]
+  local changes, original = {}, sessions.on_change
+  sessions.on_change = function(session)
+    if session == state then
+      table.insert(changes, session.status)
+    end
+    original(session)
+  end
+  assert(sessions.expand(49, root, true))
+  wait_for(function()
+    return root.children ~= nil
+  end)
+  sessions.on_change = original
+  assert(vim.deep_equal(changes, { "expanding", "ready" }), vim.inspect(changes))
+  local display = root.children[1]._workspace_display
+  local requests = terminals[49].requests
+  assert(sessions.expand(49, root, false))
+  assert(sessions.expand(49, root, true))
+  assert(not state.pending and terminals[49].requests == requests)
+  assert(root.children[1]._workspace_display == display, "Loaded child formatting should be reused")
+end)
+
+test("unchanged renders skip buffer writes and invalidate formatting on data or width changes", function()
+  assert(workspace.open({ term_id = 50 }))
+  local state = ready(50)
+  local root = state.variables[1]
+  local display = root._workspace_display
+  local tick = vim.api.nvim_buf_get_changedtick(workspace.buffer)
+  workspace.render()
+  workspace.render()
+  assert(vim.api.nvim_buf_get_changedtick(workspace.buffer) == tick)
+  assert(root._workspace_display == display)
+  root.name, root.value, root.type, root.dimensions = "\228\189\160\229\165\189", "updated", "String", "2 x 3"
+  workspace.render()
+  assert(root._workspace_display ~= display)
+  local text = table.concat(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false), "\n")
+  assert(text:find(root.name, 1, true) and text:find("[2 x 3] updated", 1, true) and text:find("String", 1, true))
+  display = root._workspace_display
+  local ambiwidth = vim.o.ambiwidth
+  vim.o.ambiwidth = ambiwidth == "single" and "double" or "single"
+  workspace.render()
+  vim.o.ambiwidth = ambiwidth
+  assert(root._workspace_display ~= display, "Display-width rules must invalidate the cache")
+  display = root._workspace_display
+  vim.api.nvim_win_set_width(workspace.window, 28)
+  workspace.render()
+  assert(root._workspace_display ~= display and root._workspace_display.width == 27)
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(workspace.buffer, 0, -1, false)) do
+    assert(vim.fn.strdisplaywidth(line) <= 27)
+  end
+end)
+
 test("refresh preserves the viewport of a deeply scrolled field list", function()
   responder = function(peer, id, _, fields)
     if fields[1] == "REFRESH" then

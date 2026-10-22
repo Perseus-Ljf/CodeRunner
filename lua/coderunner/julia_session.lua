@@ -128,8 +128,9 @@ local function receive(session, line)
     session.pending = nil
     session.status, session.message = "ready", nil
     stop_timer(session)
-    pump(session)
-    emit(session)
+    if not pump(session) then
+      emit(session)
+    end
   elseif fields[1] == "ERROR" then
     assert(#fields == 3, "Invalid error record")
     local message = decode(fields[3])
@@ -139,8 +140,9 @@ local function receive(session, line)
     session.pending = nil
     session.status, session.message = "error", message
     stop_timer(session)
-    emit(session)
-    pump(session)
+    if not pump(session) then
+      emit(session)
+    end
   else
     error("Unknown workspace record")
   end
@@ -269,18 +271,19 @@ end
 
 pump = function(session)
   if not session.authenticated or session.pending then
-    return
+    return false
   end
   if session.refresh_queued then
-    M.refresh(session.term_id)
+    return M.refresh(session.term_id)
   elseif session.dirty and config.options.workspace.auto_refresh then
     schedule_auto(session)
   else
     local node = unloaded(session, session.variables)
     if node then
-      request(session, node)
+      return request(session, node)
     end
   end
+  return false
 end
 
 function M.expand(term_id, node, expanded)
@@ -292,8 +295,9 @@ function M.expand(term_id, node, expanded)
   if expanded then
     node.error = nil
   end
-  emit(session)
-  pump(session)
+  if not pump(session) then
+    emit(session)
+  end
   return true
 end
 
@@ -315,6 +319,7 @@ local function listen(session, token)
         close(client)
         return
       end
+      client:nodelay(true)
       session.candidates[client] = true
       local buffer, authenticated = "", false
       client:read_start(vim.schedule_wrap(function(read_err, data)

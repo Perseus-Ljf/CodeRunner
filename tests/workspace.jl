@@ -133,6 +133,31 @@ end
     @test getfield(probe, :partial) == 99
 end
 
+mutable struct WriteCounter <: IO
+    buffer::IOBuffer
+    writes::Int
+end
+Base.unsafe_write(io::WriteCounter, data::Ptr{UInt8}, count::UInt) = (io.writes += 1; Base.unsafe_write(io.buffer, data, count))
+Base.write(io::WriteCounter, byte::UInt8) = (io.writes += 1; write(io.buffer, byte))
+Base.flush(io::WriteCounter) = flush(io.buffer)
+
+@testset "Batched response frames" begin
+    store = CodeRunnerWorkspace.Store()
+    store.generation = 7
+    rows = CodeRunnerWorkspace.Item[("\u53d8\u91cf", "String", "", "line\n\tvalue", 3, true)]
+    output = WriteCounter(IOBuffer(), 0)
+    CodeRunnerWorkspace.reply(output, 11, store, rows, true)
+    @test output.writes == 1
+    lines = split(String(take!(output.buffer)), '\n'; keepempty=false)
+    @test length(lines) == 3
+    @test lines[1] == "BEGIN\t11\t7"
+    @test lines[3] == "END\t11\t1"
+    fields = split(lines[2], '\t')
+    @test fields[1:2] == ["VAR", "11"]
+    @test Tuple(String(hex2bytes(field)) for field in fields[3:6]) == rows[1][1:4]
+    @test fields[7:8] == ["3", "1"]
+end
+
 @testset "IPC protocol" begin
     server = listen(ip"127.0.0.1", 0)
     peer = nothing

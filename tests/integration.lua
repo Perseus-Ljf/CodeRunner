@@ -45,12 +45,21 @@ local ok, err = xpcall(function()
   buffer("julia", { "@inline function coderunner_test(x)", "    x + 1", "end" })
   vim.api.nvim_win_set_cursor(0, { 2, 4 })
   runner.run_line("term=91 hide nojump")
-  wait_for(91, "coderunner_test (generic function with 1 method)")
+  wait_for(91, "end;")
 
   buffer("julia", { 'println("TREE_RESULT_", coderunner_test(41))' })
   runner.run_line("term=91 hide nojump")
   wait_for(91, "TREE_RESULT_42")
+  assert(not output(91):find("coderunner_test (generic function with 1 method)", 1, true), output(91))
   print("PASS real Julia REPL: macro-wrapped function and statement")
+
+  buffer("julia", { "coderunner_quiet_value = 9876543210123" })
+  runner.run_line("term=91 hide nojump")
+  buffer("julia", { 'println("QUIET_RESULT_", coderunner_quiet_value)' })
+  runner.run_line("term=91 hide nojump")
+  wait_for(91, "QUIET_RESULT_9876543210123")
+  assert(not output(91):find("\n9876543210123\n", 1, true), output(91))
+  print("PASS real Julia REPL: result display suppressed, explicit output preserved")
 
   buffer("julia", {
     "function visual_test(x)",

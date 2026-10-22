@@ -3,6 +3,7 @@ local sessions = require("coderunner.julia_session")
 local M = {}
 local namespace = vim.api.nvim_create_namespace("coderunner.workspace")
 local rows = {}
+local last_buffer, last_lines, last_tick
 local closed_marker, open_marker = vim.fn.nr2char(9656), vim.fn.nr2char(9662)
 
 local function notify(message)
@@ -101,6 +102,7 @@ function M.render()
     end
   end
   local usable = math.max(8, width - 1)
+  local width_rules = vim.o.ambiwidth .. vim.fn.string(vim.fn.getcellwidths())
   local columns = usable >= 42
   local name_width = math.floor(usable * 0.38)
   local type_width = math.floor(usable * 0.25)
@@ -133,34 +135,67 @@ function M.render()
   if session and session.message then
     table.insert(lines, session.message)
   end
+  for index, line in ipairs(lines) do
+    lines[index] = fit(line, usable)
+  end
   local function append(nodes, depth)
     for _, node in ipairs(nodes) do
-      local expanded = session.expanded[node.path]
-      local marker = node.expandable and (expanded and open_marker or closed_marker) or " "
-      local name = string.rep("  ", depth) .. marker .. " " .. node.name
-      local value = node.dimensions ~= "" and ("[" .. node.dimensions .. "] " .. node.value) or node.value
-      local display_type = node.type
-      if display_type:match("^[%a_][%w_%.]*$") then
-        display_type = display_type:match("([%w_]+)$")
+      local expanded = not not session.expanded[node.path]
+      -- Snapshot nodes own their formatting cache; a refresh replaces the nodes.
+      local display = node._workspace_display
+      if
+        not display
+        or display.width ~= usable
+        or display.width_rules ~= width_rules
+        or display.depth ~= depth
+        or display.expanded ~= expanded
+        or display.name ~= node.name
+        or display.value ~= node.value
+        or display.type ~= node.type
+        or display.dimensions ~= node.dimensions
+        or display.expandable ~= node.expandable
+      then
+        local marker = node.expandable and (expanded and open_marker or closed_marker) or " "
+        local name = string.rep("  ", depth) .. marker .. " " .. node.name
+        local value = node.dimensions ~= "" and ("[" .. node.dimensions .. "] " .. node.value) or node.value
+        local display_type = node.type
+        if display_type:match("^[%a_][%w_%.]*$") then
+          display_type = display_type:match("([%w_]+)$")
+        end
+        local line, value_start, type_start = cells(name, value, display_type)
+        display = {
+          width = usable,
+          width_rules = width_rules,
+          depth = depth,
+          expanded = expanded,
+          name = node.name,
+          value = node.value,
+          type = node.type,
+          dimensions = node.dimensions,
+          expandable = node.expandable,
+          line = line,
+          value_start = value_start,
+          type_start = type_start,
+        }
+        node._workspace_display = display
       end
-      local line, value_start, type_start = cells(name, value, display_type)
-      table.insert(lines, line)
+      table.insert(lines, display.line)
       new_rows[#lines] = { node = node, depth = depth }
       if columns then
-        highlights[#lines] = { value_start = value_start, type_start = type_start, node = node }
+        highlights[#lines] = display
       end
       if node.expandable and expanded then
         if node.children then
           append(node.children, depth + 1)
           if node.truncated then
-            table.insert(lines, string.rep("  ", depth + 1) .. "  ... more children omitted")
+            table.insert(lines, fit(string.rep("  ", depth + 1) .. "  ... more children omitted", usable))
           end
         elseif node.error then
-          table.insert(lines, string.rep("  ", depth + 1) .. "  " .. node.error)
+          table.insert(lines, fit(string.rep("  ", depth + 1) .. "  " .. node.error, usable))
         else
           table.insert(
             lines,
-            string.rep("  ", depth + 1) .. (session.authenticated and "  Loading..." or "  Disconnected")
+            fit(string.rep("  ", depth + 1) .. (session.authenticated and "  Loading..." or "  Disconnected"), usable)
           )
         end
       end
@@ -168,24 +203,37 @@ function M.render()
   end
   append(variables, 0)
   if #variables == 0 and status == "ready" then
-    table.insert(lines, "No user variables")
-  end
-  for index, line in ipairs(lines) do
-    lines[index] = fit(line, usable)
+    table.insert(lines, fit("No user variables", usable))
   end
   rows = new_rows
-  vim.bo[M.buffer].modifiable = true
-  vim.api.nvim_buf_set_lines(M.buffer, 0, -1, false, lines)
-  vim.bo[M.buffer].modifiable = false
-  vim.api.nvim_buf_clear_namespace(M.buffer, namespace, 0, -1)
-  for _, item in ipairs({ { 0, "Title" }, { 1, "Comment" }, { 2, "Comment" }, { 4, "Comment" }, { 5, "Comment" } }) do
-    vim.api.nvim_buf_add_highlight(M.buffer, namespace, item[2], item[1], 0, -1)
+  local changed = last_buffer ~= M.buffer
+    or last_tick ~= vim.api.nvim_buf_get_changedtick(M.buffer)
+    or not last_lines
+    or #last_lines ~= #lines
+  if not changed then
+    for index, line in ipairs(lines) do
+      if last_lines[index] ~= line then
+        changed = true
+        break
+      end
+    end
   end
-  for line, spans in pairs(highlights) do
-    vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Identifier", line - 1, 0, spans.value_start)
-    local group = spans.node.type == "String" and "String" or "Normal"
-    vim.api.nvim_buf_add_highlight(M.buffer, namespace, group, line - 1, spans.value_start, spans.type_start)
-    vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Type", line - 1, spans.type_start, -1)
+  if changed then
+    vim.bo[M.buffer].modifiable = true
+    vim.api.nvim_buf_set_lines(M.buffer, 0, -1, false, lines)
+    vim.bo[M.buffer].modifiable = false
+    vim.api.nvim_buf_clear_namespace(M.buffer, namespace, 0, -1)
+    for _, item in ipairs({ { 0, "Title" }, { 1, "Comment" }, { 2, "Comment" }, { 4, "Comment" }, { 5, "Comment" } }) do
+      vim.api.nvim_buf_add_highlight(M.buffer, namespace, item[2], item[1], 0, -1)
+    end
+    for line, spans in pairs(highlights) do
+      vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Identifier", line - 1, 0, spans.value_start)
+      local group = spans.type == "String" and "String" or "Normal"
+      vim.api.nvim_buf_add_highlight(M.buffer, namespace, group, line - 1, spans.value_start, spans.type_start)
+      vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Type", line - 1, spans.type_start, -1)
+    end
+    last_buffer, last_lines = M.buffer, lines
+    last_tick = vim.api.nvim_buf_get_changedtick(M.buffer)
   end
   vim.b[M.buffer].coderunner_workspace_term = M.term_id
   if view then

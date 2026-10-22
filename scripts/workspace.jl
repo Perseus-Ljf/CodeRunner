@@ -33,7 +33,8 @@ Store() = Store(0, 0, Dict{Int,Node}(), Dict{Int,Tuple{Vector{Item},Bool}}())
 clip(text::String, limit::Int) = length(text) > limit ? first(text, limit) * "..." : text
 
 # Raw fields and built-in containers only: never call custom show/getproperty.
-function expandable(value)
+# Keep inspection type-erased: a REPL can introduce new concrete types at any time.
+function expandable(@nospecialize(value))
     (value isa UndefinedField || value isa AbstractString || value isa Symbol ||
         value isa Type || value isa Function || value isa Module || value isa Dict ||
         value isa Task || value isa IO || typeof(value) in SCALAR_TYPES) && return false
@@ -41,7 +42,7 @@ function expandable(value)
     return isstructtype(typeof(value)) && fieldcount(typeof(value)) > 0
 end
 
-function preview(value, limit::Int)
+function preview(@nospecialize(value), limit::Int)
     if value isa UndefinedField
         return "#undef"
     elseif value isa String || value isa SubString{String}
@@ -71,20 +72,20 @@ function preview(value, limit::Int)
     end
 end
 
-function scalar_preview(value, limit)
+function scalar_preview(@nospecialize(value), limit)
     if value isa String || value isa SubString{String} || typeof(value) in SCALAR_TYPES
         return preview(value, limit)
     end
     return "<" * clip(string(typeof(value)), limit) * ">"
 end
 
-function describe(name, value, limit::Int)
+function describe(@nospecialize(name), @nospecialize(value), limit::Int)
     dimensions = value isa Array || value isa BitArray ? join(size(value), " x ") : ""
     type = value isa UndefinedField ? "" : clip(string(typeof(value)), 512)
     return (clip(string(name), 512), type, clip(dimensions, 128), preview(value, limit))
 end
 
-function item(store::Store, name, value, limit::Int, ancestors=Any[])
+function item(store::Store, @nospecialize(name), @nospecialize(value), limit::Int, ancestors=Any[])
     description = Base.invokelatest(describe, name, value, limit)
     can_expand = expandable(value)
     if can_expand && any(parent -> parent === value, ancestors)
@@ -165,7 +166,7 @@ function changed()
             version = CHANGE_VERSION[]
             lock(WRITE_LOCK) do
                 if CONNECTION[] === socket && isopen(socket)
-                    println(socket, "CHANGED")
+                    write(socket, "CHANGED\n")
                     flush(socket)
                 end
             end
@@ -209,13 +210,18 @@ function install_hook()
 end
 
 function reply(socket, id, store, rows, truncated)
+    # println on a TCP stream writes its arguments separately. Buffer the full
+    # frame to avoid small-packet/delayed-ACK stalls and hundreds of syscalls.
+    buffer = IOBuffer()
+    println(buffer, "BEGIN\t", id, '\t', store.generation)
+    for row in rows
+        text = join(bytes2hex.(codeunits.(row[1:4])), '\t')
+        println(buffer, "VAR\t", id, '\t', text, '\t', row[5], '\t', row[6] ? "1" : "0")
+    end
+    println(buffer, "END\t", id, '\t', truncated ? "1" : "0")
+    payload = take!(buffer)
     lock(WRITE_LOCK) do
-        println(socket, "BEGIN\t", id, '\t', store.generation)
-        for row in rows
-            text = join(bytes2hex.(codeunits.(row[1:4])), '\t')
-            println(socket, "VAR\t", id, '\t', text, '\t', row[5], '\t', row[6] ? "1" : "0")
-        end
-        println(socket, "END\t", id, '\t', truncated ? "1" : "0")
+        write(socket, payload)
         flush(socket)
     end
 end
@@ -225,7 +231,7 @@ end
 function serve(socket::TCPSocket, token::String, hooked::Bool)
     store = Store()
     try
-        println(socket, "HELLO\t", token, "\t2\t", hooked ? "1" : "0")
+        write(socket, "HELLO\t$token\t2\t$(hooked ? 1 : 0)\n")
         flush(socket)
         while isopen(socket) && !eof(socket)
             request = readline(socket)
@@ -250,7 +256,8 @@ function serve(socket::TCPSocket, token::String, hooked::Bool)
                 reply(socket, id, store, rows, truncated)
             catch
                 lock(WRITE_LOCK) do
-                    println(socket, "ERROR\t", id, '\t', bytes2hex(codeunits("Object changed or inspection failed; refresh to retry")))
+                    message = bytes2hex(codeunits("Object changed or inspection failed; refresh to retry"))
+                    write(socket, "ERROR\t$id\t$message\n")
                     flush(socket)
                 end
             end
@@ -267,10 +274,16 @@ function start(port::Integer, token::String)
     previous = CONNECTION[]
     previous !== nothing && isopen(previous) && close(previous)
     socket = connect(ip"127.0.0.1", port)
+    Sockets.nagle(socket, false)
     CONNECTION[] = socket
     hooked = install_hook()
     errormonitor(@async serve(socket, token, hooked))
     return nothing
 end
+
+# Compile the type-erased traversal once while loading the helper, rather than
+# on the first keypress. This does not enumerate or retain any user objects.
+precompile(children, (Store, Int, Int, Int, Int))
+precompile(setindex!, (Dict{Int,Tuple{Vector{Item},Bool}}, Tuple{Vector{Item},Bool}, Int))
 
 end

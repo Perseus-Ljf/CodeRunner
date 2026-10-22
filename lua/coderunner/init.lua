@@ -217,6 +217,12 @@ local function send_lines(lines, opts, lang)
   end
 
   lang = lang or config.get_language(current_filetype())
+  if current_filetype() == "julia" and lang.suppress_output then
+    local body, whitespace = code:match("^(.-)(%s*)$")
+    if body:sub(-1) ~= ";" then
+      code = body .. ";" .. whitespace
+    end
+  end
   code = code .. "\n"
   local term_id = opts.term_id
   local show_terminal = opts.show_terminal

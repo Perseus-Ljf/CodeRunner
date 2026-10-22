@@ -32,6 +32,7 @@ M.defaults = {
       cell_marker = "^%s*# %%",
       comment = "^#",
       start_cmd = "julia",
+      suppress_output = true,
     },
   },
 }

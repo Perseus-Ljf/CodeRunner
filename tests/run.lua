@@ -57,9 +57,10 @@ local function test(name, fn)
   end
   vim.cmd("normal! " .. vim.api.nvim_replace_termcodes("<Esc>", true, false, true))
 end
-local function sent(lines)
+local function sent(lines, suffix)
   equal(#calls, 1)
-  equal(calls[1].code, table.concat(lines, "\n") .. "\n")
+  suffix = suffix or (vim.bo.filetype == "julia" and ";" or "")
+  equal(calls[1].code, table.concat(lines, "\n") .. suffix .. "\n")
 end
 local function select_keys(keys, leave)
   vim.cmd("normal! " .. vim.api.nvim_replace_termcodes(keys .. (leave and "<Esc>" or ""), true, false, true))
@@ -283,6 +284,28 @@ for _, case in ipairs(julia_cases) do
     equal(calls[1].show, false)
   end)
 end
+
+test("Julia: output suppression can be disabled", function()
+  reset("julia", { "x = 1" }, { languages = { julia = { suppress_output = false } } })
+  runner.run_line("nojump")
+  sent({ "x = 1" }, "")
+end)
+
+test("Julia: existing semicolon is not duplicated", function()
+  reset("julia", { "x = 1;  " })
+  select_keys("ggV", true)
+  runner.run_selection()
+  sent({ "x = 1;  " }, "")
+end)
+
+test("Julia: semicolon precedes trailing whitespace without changing the buffer", function()
+  local lines = { "x = 1  ", "\t", "" }
+  reset("julia", lines)
+  select_keys("ggVG", true)
+  runner.run_selection()
+  equal(calls[1].code, "x = 1;  \n\t\n\n")
+  equal(vim.api.nvim_buf_get_lines(0, 0, -1, false), lines)
+end)
 
 test("Julia: selects only the statement under cursor on a semicolon-separated line", function()
   reset("julia", { "x = 1; y = sum([2, 3])" })
@@ -534,7 +557,7 @@ test("selection: configured language starts even if not enabled for cells", func
   equal(calls[1].show, false)
   equal(deferred[1].delay, 123)
   deferred[1].callback()
-  equal(calls[2].code, "println(1)\n")
+  equal(calls[2].code, "println(1);\n")
 end)
 
 test("selection: hidden existing terminal is reused without restarting Julia", function()

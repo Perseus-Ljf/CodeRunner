@@ -50,6 +50,11 @@ comments are preserved; tabs cut by a rectangle follow Neovim's native yank
 behavior. Registers and clipboard settings are restored after extraction.
 `jump` does not move the cursor for selection commands.
 
+Julia submissions append a trailing `;` by default to suppress automatic REPL
+result display (without changing the source buffer). Explicit output such as
+`println` is unaffected. Set `languages.julia.suppress_output = false` to keep
+the original result display. Other languages are unchanged.
+
 A new terminal starts the current filetype's `languages[ft].start_cmd` if
 configured. For unconfigured filetypes, selection commands use the terminal's
 default shell without falling back to Python. Existing terminals are reused as
@@ -244,6 +249,7 @@ require("coderunner").setup({
       cell_marker = "^%s*# %%",
       comment = "^#",
       start_cmd = "julia",
+      suppress_output = true,
     },
   },
 })
@@ -307,3 +313,10 @@ updates, reconnection, process isolation and terminal exit. It
 requires Julia, the parsers, and an installed toggleterm.nvim. Set
 `TOGGLETERM_RTP=/path/to/toggleterm.nvim` if the plugin is not under
 `stdpath("data")/site/pack/core/opt/toggleterm.nvim`.
+
+`make bench-workspace` runs opt-in expansion microbenchmarks: Julia field
+traversal, real loopback TCP responses, and cached expand/collapse rendering
+with 50, 500 and 2000 root variables. It reports first-use and warm median times,
+without timing thresholds in CI. Helper loading is outside these timings;
+common traversal code is precompiled during loading, without reading user
+objects. This needs Julia and Neovim, but no parsers or toggleterm.
