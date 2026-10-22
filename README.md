@@ -50,10 +50,17 @@ comments are preserved; tabs cut by a rectangle follow Neovim's native yank
 behavior. Registers and clipboard settings are restored after extraction.
 `jump` does not move the cursor for selection commands.
 
-Julia submissions append a trailing `;` by default to suppress automatic REPL
-result display (without changing the source buffer). Explicit output such as
-`println` is unaffected. Set `languages.julia.suppress_output = false` to keep
-the original result display. Other languages are unchanged.
+Julia submissions suppress automatic REPL result display by default. Single-line
+submissions append a trailing `;`; multiline submissions are wrapped in
+`begin ... end;` so earlier expressions do not print their results either. The
+wrapper adds no local scope and leaves the source buffer unchanged. Explicit
+output such as `println` is unaffected. Set
+`languages.julia.suppress_output = false` to send the original code without
+suppression. Other languages are unchanged.
+
+A multiline submission is evaluated as one block: an exception stops the rest
+of that submission, and `ans` receives the block's final result rather than
+being updated after each internal expression.
 
 A new terminal starts the current filetype's `languages[ft].start_cmd` if
 configured. For unconfigured filetypes, selection commands use the terminal's

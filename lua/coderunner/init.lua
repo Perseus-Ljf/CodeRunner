@@ -218,9 +218,14 @@ local function send_lines(lines, opts, lang)
 
   lang = lang or config.get_language(current_filetype())
   if current_filetype() == "julia" and lang.suppress_output then
-    local body, whitespace = code:match("^(.-)(%s*)$")
-    if body:sub(-1) ~= ";" then
-      code = body .. ";" .. whitespace
+    if code:find("\n", 1, true) then
+      -- Keep complete expressions in one REPL evaluation without adding a scope.
+      code = "begin\n" .. code .. "\nend;"
+    else
+      local body, whitespace = code:match("^(.-)(%s*)$")
+      if body:sub(-1) ~= ";" then
+        code = body .. ";" .. whitespace
+      end
     end
   end
   code = code .. "\n"

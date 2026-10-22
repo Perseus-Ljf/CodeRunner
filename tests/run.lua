@@ -59,8 +59,13 @@ local function test(name, fn)
 end
 local function sent(lines, suffix)
   equal(#calls, 1)
-  suffix = suffix or (vim.bo.filetype == "julia" and ";" or "")
-  equal(calls[1].code, table.concat(lines, "\n") .. suffix .. "\n")
+  local code = table.concat(lines, "\n")
+  if suffix == nil and vim.bo.filetype == "julia" then
+    code = #lines > 1 and ("begin\n" .. code .. "\nend;") or (code .. ";")
+  else
+    code = code .. (suffix or "")
+  end
+  equal(calls[1].code, code .. "\n")
 end
 local function select_keys(keys, leave)
   vim.cmd("normal! " .. vim.api.nvim_replace_termcodes(keys .. (leave and "<Esc>" or ""), true, false, true))
@@ -298,13 +303,62 @@ test("Julia: existing semicolon is not duplicated", function()
   sent({ "x = 1;  " }, "")
 end)
 
-test("Julia: semicolon precedes trailing whitespace without changing the buffer", function()
+test("Julia: multiline wrapper preserves trailing whitespace without changing the buffer", function()
   local lines = { "x = 1  ", "\t", "" }
   reset("julia", lines)
   select_keys("ggVG", true)
   runner.run_selection()
-  equal(calls[1].code, "x = 1;  \n\t\n\n")
+  equal(calls[1].code, "begin\nx = 1  \n\t\n\nend;\n")
   equal(vim.api.nvim_buf_get_lines(0, 0, -1, false), lines)
+end)
+
+test("Julia: multiline selection suppresses every expression without requiring a parser", function()
+  local lines = { "x = 1", "y = 2 # trailing comment", "# final comment" }
+  reset("julia", lines)
+  local get_string_parser = vim.treesitter.get_string_parser
+  vim.treesitter.get_string_parser = function()
+    error("missing parser")
+  end
+  local ok, err = pcall(runner.send_selection, nil, { 1, #lines })
+  vim.treesitter.get_string_parser = get_string_parser
+  assert(ok, err)
+  equal(calls[1].code, "begin\nx = 1\ny = 2 # trailing comment\n# final comment\nend;\n")
+  equal(vim.api.nvim_buf_get_lines(0, 0, -1, false), lines)
+end)
+
+test("Julia: multiline cells suppress every expression", function()
+  reset("julia", { "# %%", "x = 1", "y = sum(", "    [2, 3]", ") # trailing comment" })
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  runner.run_block("nojump")
+  equal(calls[1].code, "begin\nx = 1\ny = sum(\n    [2, 3]\n) # trailing comment\nend;\n")
+end)
+
+test("Julia: multiline selection preserves strings, blank lines and block comments", function()
+  local lines = { 'text = """', "# string content", "", '"""', "#= comment", "not code =#", "x = 2" }
+  reset("julia", lines)
+  runner.send_selection(nil, { 1, #lines })
+  equal(calls[1].code, 'begin\ntext = """\n# string content\n\n"""\n#= comment\nnot code =#\nx = 2\nend;\n')
+end)
+
+test("Julia: multiline suppression can be disabled for both cells and selections", function()
+  for _, kind in ipairs({ "block", "selection" }) do
+    reset("julia", { "x = 1", "y = 2" }, { languages = { julia = { suppress_output = false } } })
+    if kind == "block" then
+      runner.run_block("nojump")
+    else
+      runner.send_selection(nil, { 1, 2 })
+    end
+    equal(calls[1].code, "x = 1\ny = 2\n")
+  end
+end)
+
+test("Julia: delayed startup sends the whole quiet block", function()
+  reset("julia", { "x = 1", "y = 2" })
+  exists = false
+  runner.send_selection(nil, { 1, 2 })
+  equal(calls[1].code, "julia")
+  deferred[1].callback()
+  equal(calls[2].code, "begin\nx = 1\ny = 2\nend;\n")
 end)
 
 test("Julia: selects only the statement under cursor on a semicolon-separated line", function()

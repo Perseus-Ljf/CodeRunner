@@ -61,6 +61,47 @@ local ok, err = xpcall(function()
   assert(not output(91):find("\n9876543210123\n", 1, true), output(91))
   print("PASS real Julia REPL: result display suppressed, explicit output preserved")
 
+  for _, kind in ipairs({ "block", "selection" }) do
+    buffer("julia", {
+      "quiet_first = 7123456789012 # inline comment",
+      "quiet_second = sum(",
+      "    [8123456789012, 1]",
+      ")",
+      "quiet_total = 0",
+      "for i in 1:4",
+      "    quiet_total += i",
+      "end",
+      "# final comment",
+    })
+    if kind == "block" then
+      runner.run_block("term=91 hide nojump")
+    else
+      select_all("term=91 hide")
+    end
+    buffer("julia", {
+      ('println("QUIET_%s_", quiet_first, "_", quiet_second, "_", quiet_total)'):format(kind),
+    })
+    runner.run_line("term=91 hide nojump")
+    wait_for(91, "QUIET_" .. kind .. "_7123456789012_8123456789013_10")
+    for _, value in ipairs({ "7123456789012", "8123456789013" }) do
+      assert(not output(91):match("\n%s*" .. value .. "%s*\n"), output(91))
+    end
+    print("PASS real Julia REPL: quiet multiline " .. kind .. ", global bindings and soft scope")
+  end
+
+  buffer("julia", {
+    'quiet_text = """',
+    "# literal string content",
+    "",
+    '"""',
+    "#= block comment",
+    "not Julia code =#",
+    'println("QUIET_STRING_", quiet_text == "# literal string content\\n\\n")',
+  })
+  select_all("term=91 hide")
+  wait_for(91, "QUIET_STRING_true")
+  print("PASS real Julia REPL: quiet selection preserves multiline strings and comments")
+
   buffer("julia", {
     "function visual_test(x)",
     "    #= retained block comment",
