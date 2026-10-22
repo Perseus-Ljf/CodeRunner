@@ -8,7 +8,6 @@ const CONNECTION = Ref{Union{Nothing,TCPSocket}}(nothing)
 const WRITE_LOCK = ReentrantLock()
 const CHANGE_PENDING = Ref{Union{Nothing,TCPSocket}}(nothing)
 const CHANGE_VERSION = Ref(0)
-const MAX_DEPTH = 8
 const MAX_NODES = 10000
 const SCALAR_TYPES = (Bool, Int8, Int16, Int32, Int64, Int128, UInt8, UInt16,
     UInt32, UInt64, UInt128, Float16, Float32, Float64, Char, Symbol, Nothing, Missing)
@@ -17,9 +16,10 @@ struct UndefinedField end
 const UNDEFINED = UndefinedField()
 const Item = Tuple{String,String,String,String,Int,Bool}
 
+# Share ancestry instead of copying the full chain for every expanded node.
 struct Node
     value::Any
-    ancestors::Vector{Any}
+    parent::Union{Nothing,Node}
 end
 
 mutable struct Store
@@ -85,18 +85,21 @@ function describe(@nospecialize(name), @nospecialize(value), limit::Int)
     return (clip(string(name), 512), type, clip(dimensions, 128), preview(value, limit))
 end
 
-function item(store::Store, @nospecialize(name), @nospecialize(value), limit::Int, ancestors=Any[])
+function item(store::Store, @nospecialize(name), @nospecialize(value), limit::Int, parent::Union{Nothing,Node}=nothing)
     description = Base.invokelatest(describe, name, value, limit)
     can_expand = expandable(value)
-    if can_expand && any(parent -> parent === value, ancestors)
-        return (description[1:3]..., "<circular reference>", 0, false)
-    elseif can_expand && length(ancestors) >= MAX_DEPTH
-        return (description[1:3]..., "<maximum depth>", 0, false)
-    elseif can_expand && length(store.nodes) >= MAX_NODES
+    if can_expand
+        ancestor = parent
+        while ancestor !== nothing
+            ancestor.value === value && return (description[1:3]..., "<circular reference>", 0, false)
+            ancestor = ancestor.parent
+        end
+    end
+    if can_expand && length(store.nodes) >= MAX_NODES
         return (description[1:3]..., "<node limit>", 0, false)
     elseif can_expand
         store.next_id += 1
-        store.nodes[store.next_id] = Node(value, [ancestors; Any[value]])
+        store.nodes[store.next_id] = Node(value, parent)
         return (description..., store.next_id, true)
     end
     return (description..., 0, false)
@@ -146,7 +149,7 @@ function children(store::Store, generation::Int, id::Int, limit::Int, preview_le
         else
             isdefined(value, index) ? getfield(value, index) : UNDEFINED
         end
-        push!(rows, item(store, name, child, preview_length, node.ancestors))
+        push!(rows, item(store, name, child, preview_length, node))
     end
     result = (rows, count > limit)
     store.children[id] = result

@@ -70,6 +70,7 @@ end
     @test !truncated
     @test first.(fields) == ["name", "address", "values"]
     @test fields[1][4] == repr("Ada")
+    @test store.nodes[fields[2][5]].parent === store.nodes[root[5]]
     address, _ = CodeRunnerWorkspace.children(store, 1, fields[2][5], 100, 120)
     @test address[1][4] == repr("Paris")
     @test address[2][4] == "75001"
@@ -98,14 +99,37 @@ end
     @test !fields[1][6]
 
     nested = WorkspaceLink(nothing)
-    for _ in 1:12
+    for _ in 1:128
         nested = WorkspaceLink(nested)
     end
     deep = CodeRunnerWorkspace.item(store, "deep", nested, 120)
+    levels = 0
     while deep[6]
+        levels += 1
         deep = CodeRunnerWorkspace.children(store, 1, deep[5], 100, 120)[1][1]
     end
-    @test deep[4] == "<maximum depth>"
+    @test levels == 129
+    @test deep[4] == "nothing"
+
+    tail = WorkspaceLink(nothing)
+    nested_cycle = tail
+    for _ in 1:32
+        nested_cycle = WorkspaceLink(nested_cycle)
+    end
+    tail.child = nested_cycle
+    deep_cycle = CodeRunnerWorkspace.item(store, "deep_cycle", nested_cycle, 120)
+    while deep_cycle[6]
+        deep_cycle = CodeRunnerWorkspace.children(store, 1, deep_cycle[5], 100, 120)[1][1]
+    end
+    @test deep_cycle[4] == "<circular reference>"
+
+    full = CodeRunnerWorkspace.Store()
+    for id in 1:CodeRunnerWorkspace.MAX_NODES
+        full.nodes[id] = CodeRunnerWorkspace.Node(nothing, nothing)
+    end
+    limited = CodeRunnerWorkspace.item(full, "limited", nested, 120)
+    @test limited[4] == "<node limit>"
+    @test !limited[6]
     CodeRunnerWorkspace.snapshot(500, 120, store)
     @test_throws ErrorException CodeRunnerWorkspace.children(store, 1, root[5], 100, 120)
 end

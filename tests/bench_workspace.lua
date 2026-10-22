@@ -52,7 +52,12 @@ for _, count in ipairs({ 50, 500, 2000 }) do
   for index = 2, count do
     variables[index] = leaf("variable" .. index)
   end
+  local variables_by_name = {}
+  for _, variable in ipairs(variables) do
+    variables_by_name[variable.name] = variable
+  end
   local session = {
+    variables_by_name = variables_by_name,
     term_id = 1,
     terminal = terminal,
     job_id = 1,
@@ -79,6 +84,14 @@ for _, count in ipairs({ 50, 500, 2000 }) do
   print(
     ("Cached expand + collapse, %4d roots: first=%.3f ms median=%.3f ms"):format(count, samples[1], median(samples))
   )
+  local lookups = {}
+  for index = 1, 25 do
+    local started = uv.hrtime()
+    assert(workspace.find("variable" .. count, { term_id = 1 }))
+    lookups[index] = (uv.hrtime() - started) / 1e6
+  end
+  results[tostring(count)].lookup_median_ms = median(lookups)
+  print(("Cached variable lookup,   %4d roots: median=%.3f ms"):format(count, median(lookups)))
 end
 if vim.env.CODERUNNER_BENCH_OUTPUT then
   vim.fn.writefile({ vim.fn.json_encode(results) }, vim.env.CODERUNNER_BENCH_OUTPUT)

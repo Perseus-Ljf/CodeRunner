@@ -220,10 +220,19 @@ local ok, err = xpcall(function()
   await_value(91, "workspace_person", "3 fields")
   local person = variable(91, "workspace_person")
   assert(person.expandable)
-  assert(sessions.expand(91, person, true))
+  buffer("julia", { "workspace_person" })
+  local source_window = vim.api.nvim_get_current_win()
+  local before_find = sessions.sessions[91].sequence
+  vim.cmd("normal! gg0viw" .. vim.api.nvim_replace_termcodes("<Esc>", true, false, true))
+  vim.cmd("'<,'>CodeRunWorkspaceFind term=91")
   assert(vim.wait(5000, function()
     return person.children ~= nil
   end, 20))
+  assert(vim.api.nvim_get_current_win() == workspace.window)
+  assert(workspace.preferred_path == person.path)
+  assert(sessions.sessions[91].sequence == before_find + 1, "Cached find should only fetch children")
+  vim.api.nvim_set_current_win(source_window)
+  print("PASS Julia workspace: selected variable is focused and expanded without refreshing roots")
   assert(person.children[1].name == "name" and person.children[1].value == '"Ada"')
   local address = person.children[2]
   assert(address.name == "address" and address.expandable)
@@ -242,6 +251,27 @@ local ok, err = xpcall(function()
     output(91)
   )
   print("PASS Julia workspace: real nested structs and expanded fields update automatically")
+
+  buffer("julia", {
+    "mutable struct WorkspaceDeepLink; child::Any; end",
+    "workspace_deep = WorkspaceDeepLink(nothing)",
+    "for i in 1:12",
+    "    workspace_deep = WorkspaceDeepLink(workspace_deep)",
+    "end",
+  })
+  select_all("term=91 hide")
+  await_value(91, "workspace_deep", "1 field")
+  local deep = variable(91, "workspace_deep")
+  for _ = 1, 13 do
+    assert(deep.expandable and deep.value ~= "<maximum depth>", vim.inspect(deep))
+    assert(sessions.expand(91, deep, true))
+    assert(vim.wait(5000, function()
+      return deep.children ~= nil
+    end, 20))
+    deep = deep.children[1]
+  end
+  assert(deep.value == "nothing" and not deep.expandable)
+  print("PASS Julia workspace: nested structs expand beyond the previous eight-level limit")
 
   assert(vim.wait(5000, function()
     return sessions.sessions[91].status == "ready"

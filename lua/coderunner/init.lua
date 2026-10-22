@@ -566,6 +566,22 @@ function M.run_selection(args)
   return M.run_command("selection", args)
 end
 
+function M.find_workspace_variable(args, range)
+  local mode = vim.fn.mode()
+  local visual = mode == "v" or mode == "V" or mode == "\22"
+  local name
+  if range or visual then
+    local lines = selection_lines(range)
+    if not lines then
+      return false
+    end
+    name = table.concat(lines, "\n")
+  else
+    name = vim.fn.expand("<cword>")
+  end
+  return require("coderunner.workspace").command("find", args or "", name)
+end
+
 local function command_complete()
   return {
     "show",
@@ -597,6 +613,19 @@ function M.register_commands()
       desc = "Julia workspace: " .. action,
     })
   end
+
+  vim.api.nvim_create_user_command("CodeRunWorkspaceFind", function(opts)
+    local range = opts.range > 0 and { opts.line1, opts.line2 } or nil
+    M.find_workspace_variable(opts.args, range)
+  end, {
+    force = true,
+    nargs = "*",
+    range = true,
+    complete = function()
+      return { "term=1", "term=2", "attach" }
+    end,
+    desc = "Find the selected Julia variable in the workspace and expand it",
+  })
 
   vim.api.nvim_create_user_command("CodeRunSelection", function(opts)
     local range = opts.range > 0 and { opts.line1, opts.line2 } or nil

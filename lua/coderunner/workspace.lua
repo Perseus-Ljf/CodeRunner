@@ -2,8 +2,9 @@ local config = require("coderunner.config")
 local sessions = require("coderunner.julia_session")
 local M = {}
 local namespace = vim.api.nvim_create_namespace("coderunner.workspace")
-local rows = {}
-local last_buffer, last_lines, last_tick
+local rows, row_lines = {}, {}
+local last_buffer, last_lines, last_tick, last_highlights
+local resolve_find
 local closed_marker, open_marker = vim.fn.nr2char(9656), vim.fn.nr2char(9662)
 
 local function notify(message)
@@ -131,7 +132,7 @@ function M.render()
     columns and cells("VARIABLE", "VALUE / SIZE", "TYPE") or "VARIABLE / VALUE",
     string.rep("-", usable),
   }
-  local highlights, new_rows = {}, {}
+  local highlights, new_rows, new_row_lines = {}, {}, {}
   if session and session.message then
     table.insert(lines, session.message)
   end
@@ -181,6 +182,7 @@ function M.render()
       end
       table.insert(lines, display.line)
       new_rows[#lines] = { node = node, depth = depth }
+      new_row_lines[node.path] = #lines
       if columns then
         highlights[#lines] = display
       end
@@ -205,45 +207,64 @@ function M.render()
   if #variables == 0 and status == "ready" then
     table.insert(lines, fit("No user variables", usable))
   end
-  rows = new_rows
-  local changed = last_buffer ~= M.buffer
-    or last_tick ~= vim.api.nvim_buf_get_changedtick(M.buffer)
-    or not last_lines
-    or #last_lines ~= #lines
-  if not changed then
-    for index, line in ipairs(lines) do
-      if last_lines[index] ~= line then
-        changed = true
-        break
+  rows, row_lines = new_rows, new_row_lines
+  local reusable = last_buffer == M.buffer
+    and last_tick == vim.api.nvim_buf_get_changedtick(M.buffer)
+    and last_lines ~= nil
+  local first, old_end, new_end = 0, reusable and #last_lines or vim.api.nvim_buf_line_count(M.buffer), #lines
+  if reusable then
+    local function same_line(old, new)
+      if last_lines[old] ~= lines[new] then
+        return false
+      end
+      local before, after = last_highlights[old], highlights[new]
+      if not before or not after then
+        return before == after
+      end
+      return before.value_start == after.value_start
+        and before.type_start == after.type_start
+        and (before.type == "String") == (after.type == "String")
+    end
+    while first < math.min(old_end, new_end) and same_line(first + 1, first + 1) do
+      first = first + 1
+    end
+    while old_end > first and new_end > first and same_line(old_end, new_end) do
+      old_end, new_end = old_end - 1, new_end - 1
+    end
+  end
+  if first < old_end or first < new_end then
+    -- Retain unchanged text and its highlights when only one subtree changes.
+    vim.api.nvim_buf_clear_namespace(M.buffer, namespace, first, old_end)
+    vim.bo[M.buffer].modifiable = true
+    vim.api.nvim_buf_set_lines(M.buffer, first, old_end, false, vim.list_slice(lines, first + 1, new_end))
+    vim.bo[M.buffer].modifiable = false
+    vim.api.nvim_buf_clear_namespace(M.buffer, namespace, first, new_end)
+    for _, item in ipairs({ { 0, "Title" }, { 1, "Comment" }, { 2, "Comment" }, { 4, "Comment" }, { 5, "Comment" } }) do
+      if item[1] >= first and item[1] < new_end then
+        vim.api.nvim_buf_add_highlight(M.buffer, namespace, item[2], item[1], 0, #lines[item[1] + 1])
+      end
+    end
+    for line = first + 1, new_end do
+      local spans = highlights[line]
+      if spans then
+        vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Identifier", line - 1, 0, spans.value_start)
+        local group = spans.type == "String" and "String" or "Normal"
+        vim.api.nvim_buf_add_highlight(M.buffer, namespace, group, line - 1, spans.value_start, spans.type_start)
+        vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Type", line - 1, spans.type_start, #lines[line])
       end
     end
   end
-  if changed then
-    vim.bo[M.buffer].modifiable = true
-    vim.api.nvim_buf_set_lines(M.buffer, 0, -1, false, lines)
-    vim.bo[M.buffer].modifiable = false
-    vim.api.nvim_buf_clear_namespace(M.buffer, namespace, 0, -1)
-    for _, item in ipairs({ { 0, "Title" }, { 1, "Comment" }, { 2, "Comment" }, { 4, "Comment" }, { 5, "Comment" } }) do
-      vim.api.nvim_buf_add_highlight(M.buffer, namespace, item[2], item[1], 0, -1)
-    end
-    for line, spans in pairs(highlights) do
-      vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Identifier", line - 1, 0, spans.value_start)
-      local group = spans.type == "String" and "String" or "Normal"
-      vim.api.nvim_buf_add_highlight(M.buffer, namespace, group, line - 1, spans.value_start, spans.type_start)
-      vim.api.nvim_buf_add_highlight(M.buffer, namespace, "Type", line - 1, spans.type_start, -1)
-    end
-    last_buffer, last_lines = M.buffer, lines
-    last_tick = vim.api.nvim_buf_get_changedtick(M.buffer)
-  end
+  last_buffer, last_lines, last_highlights = M.buffer, lines, highlights
+  last_tick = vim.api.nvim_buf_get_changedtick(M.buffer)
   vim.b[M.buffer].coderunner_workspace_term = M.term_id
   if view then
-    local target, best = nil, 0
-    for line, row in pairs(rows) do
-      local path = row.node.path
-      if M.preferred_path == path then
-        target, best = line, math.huge
-      elseif M.preferred_path and M.preferred_path:sub(1, #path + 1) == path .. "/" and #path > best then
-        target, best = line, #path
+    local target, best = row_lines[M.preferred_path], 0
+    if not target then
+      for line, row in pairs(rows) do
+        local path = row.node.path
+        if M.preferred_path and M.preferred_path:sub(1, #path + 1) == path .. "/" and #path > best then
+          target, best = line, #path
+        end
       end
     end
     if M.initial_cursor and next(rows) then
@@ -272,10 +293,12 @@ end
 sessions.on_change = function(session)
   if session.term_id == M.term_id then
     M.render()
+    resolve_find(session)
   end
 end
 
 function M.close()
+  M.pending_find = nil
   if window_valid() then
     local tab = vim.api.nvim_win_get_tabpage(M.window)
     local normal_windows = 0
@@ -326,18 +349,14 @@ local function move_tree(expand)
   if node.expandable and (not not session.expanded[node.path]) ~= expand then
     sessions.expand(M.term_id, node, expand)
   elseif not expand and node.parent then
-    for line, row in pairs(rows) do
-      if row.node == node.parent then
-        vim.api.nvim_win_set_cursor(M.window, { line, 0 })
-        break
-      end
+    local line = row_lines[node.parent.path]
+    if line then
+      vim.api.nvim_win_set_cursor(M.window, { line, 0 })
     end
   elseif expand and node.children and #node.children > 0 then
-    for line, row in pairs(rows) do
-      if row.node == node.children[1] then
-        vim.api.nvim_win_set_cursor(M.window, { line, 0 })
-        break
-      end
+    local line = row_lines[node.children[1].path]
+    if line then
+      vim.api.nvim_win_set_cursor(M.window, { line, 0 })
     end
   end
 end
@@ -373,7 +392,7 @@ function M.open(opts)
   end
   if M.term_id ~= id then
     M.preferred_path, M.rendered_selection, M.preferred_offset = nil, nil, nil
-    M.initial_cursor, rows = true, {}
+    M.initial_cursor, rows, row_lines, M.pending_find = true, {}, {}, nil
   end
   M.term_id = id
   if not M.buffer or not vim.api.nvim_buf_is_valid(M.buffer) then
@@ -445,27 +464,112 @@ function M.open(opts)
     vim.api.nvim_win_set_buf(M.window, M.buffer)
   end
   M.render()
-  if session.authenticated then
+  if session.authenticated and opts.refresh ~= false then
     sessions.refresh(id)
   end
   return true
 end
 
-function M.command(action, args)
+resolve_find = function(session)
+  local pending = M.pending_find
+  if not pending or pending.term_id ~= session.term_id then
+    return
+  end
+  if not window_valid() then
+    M.pending_find = nil
+    return
+  end
+  if session.status == "disconnected" then
+    M.pending_find = nil
+    notify(session.message or "Workspace lookup failed")
+    return
+  end
+  if session.status == "error" or session.status == "timeout" then
+    if not pending.refreshed then
+      pending.refreshed = true
+      sessions.refresh(session.term_id)
+    else
+      M.pending_find = nil
+      notify(session.message or "Workspace lookup failed")
+    end
+    return
+  end
+  if not session.authenticated or (session.pending and not session.pending.node) then
+    return
+  end
+  if session.dirty then
+    pending.refreshed = true
+    sessions.refresh(session.term_id)
+    return
+  end
+  local node = session.variables_by_name and session.variables_by_name[pending.name]
+  if not node then
+    if not pending.refreshed then
+      pending.refreshed = true
+      sessions.refresh(session.term_id)
+      return
+    end
+    M.pending_find = nil
+    local suffix = session.truncated and "; snapshot is truncated, increase workspace.max_items" or ""
+    notify(("Variable '%s' is not in the Main workspace%s"):format(pending.name, suffix))
+    return
+  end
+  M.pending_find = nil
+  M.preferred_path, M.initial_cursor = node.path, false
+  M.preferred_offset = math.floor(vim.api.nvim_win_get_height(M.window) / 2)
+  M.render()
+  vim.api.nvim_set_current_win(M.window)
+  vim.api.nvim_win_set_cursor(M.window, { assert(row_lines[node.path]), 0 })
+  vim.cmd("normal! zz")
+  if node.expandable and (not session.expanded[node.path] or node.error) then
+    sessions.expand(session.term_id, node, true)
+  end
+end
+
+function M.find(name, opts)
+  name = vim.trim(name or ""):gsub("^Main%.", "")
+  if name == "" or name:find("[%s%z\1-\31\127]") then
+    notify("Select one Julia variable name or supply it to :CodeRunWorkspaceFind")
+    return false
+  end
+  opts = vim.tbl_extend("force", opts or {}, { refresh = false })
+  opts.term_id = opts.term_id or M.term_id or config.options.term_id
+  if not M.open(opts) then
+    return false
+  end
+  local session = sessions.sessions[opts.term_id]
+  M.pending_find = {
+    name = name,
+    term_id = opts.term_id,
+    refreshed = not session.authenticated or (session.pending ~= nil and not session.pending.node),
+  }
+  resolve_find(session)
+  return true
+end
+
+function M.command(action, args, name)
   local opts = {}
+  local explicit_name
   for token in (args or ""):gmatch("%S+") do
     if token == "attach" then
       opts.attach = true
     else
       local id = tonumber(token) or tonumber(token:match("^term=(%d+)$"))
       if not id or id < 1 or id % 1 ~= 0 then
-        notify("Expected a positive terminal id, term=N, or attach")
-        return false
+        if action == "find" and not explicit_name and not token:match("^term=") then
+          explicit_name = token
+        else
+          notify("Expected a positive terminal id, term=N, or attach")
+          return false
+        end
+      else
+        opts.term_id = id
       end
-      opts.term_id = id
     end
   end
-  if action == "refresh" then
+  if action == "find" then
+    return M.find(explicit_name or name, opts)
+  elseif action == "refresh" then
     return M.refresh(opts)
   elseif action == "disconnect" then
     sessions.disconnect(opts.term_id or M.term_id or config.options.term_id)
@@ -482,6 +586,14 @@ function M.command(action, args)
 end
 
 local group = vim.api.nvim_create_augroup("CodeRunnerWorkspace", { clear = true })
+vim.api.nvim_create_autocmd("WinClosed", {
+  group = group,
+  callback = function(event)
+    if tonumber(event.match) == M.window then
+      M.window, M.pending_find = nil, nil
+    end
+  end,
+})
 local resize_events = { "VimResized" }
 if vim.fn.exists("##WinResized") == 1 then
   table.insert(resize_events, "WinResized")

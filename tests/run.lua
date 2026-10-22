@@ -622,5 +622,56 @@ test("selection: hidden existing terminal is reused without restarting Julia", f
   equal(#deferred, 0)
 end)
 
+for _, case in ipairs({
+  { name = "cursor", expected = "person" },
+  { name = "live visual", keys = "gg04lv5l", expected = "person" },
+  { name = "Ex visual range", keys = "gg04lv5l", leave = true, ex = true, expected = "person" },
+}) do
+  test("workspace find: reads " .. case.name .. " without evaluating the name", function()
+    reset("julia", { "x = person + 1" })
+    local previous, lookup = package.loaded["coderunner.workspace"], nil
+    package.loaded["coderunner.workspace"] = {
+      command = function(action, args, name)
+        lookup = { action, args, name }
+        return true
+      end,
+    }
+    local ok, err = pcall(function()
+      if case.keys then
+        select_keys(case.keys, case.leave)
+      else
+        vim.api.nvim_win_set_cursor(0, { 1, 6 })
+      end
+      if case.ex then
+        vim.cmd("'<,'>CodeRunWorkspaceFind term=8")
+      else
+        assert(runner.find_workspace_variable("term=8"))
+      end
+    end)
+    package.loaded["coderunner.workspace"] = previous
+    assert(ok, err)
+    equal(lookup, { "find", "term=8", case.expected })
+    equal(#calls, 0)
+    equal(vim.api.nvim_buf_get_lines(0, 0, -1, false), { "x = person + 1" })
+  end)
+end
+
+test("workspace find: normal mode ignores a previous visual selection", function()
+  reset("julia", { "person other" })
+  select_keys("gg0v5l", true)
+  vim.api.nvim_win_set_cursor(0, { 1, 8 })
+  local previous, name = package.loaded["coderunner.workspace"], nil
+  package.loaded["coderunner.workspace"] = {
+    command = function(_, _, selected_name)
+      name = selected_name
+      return true
+    end,
+  }
+  local ok, err = pcall(runner.find_workspace_variable)
+  package.loaded["coderunner.workspace"] = previous
+  assert(ok, err)
+  equal(name, "other")
+end)
+
 print(("\n%d passed, %d failed"):format(passed, failed))
 vim.cmd(failed == 0 and "qa!" or "cquit 1")

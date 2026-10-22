@@ -94,7 +94,12 @@ vim.notify = function(message)
 end
 runner.setup()
 assert(not package.loaded["coderunner.workspace"], "Workspace should load on demand")
-for _, command in ipairs({ "CodeRunWorkspace", "CodeRunWorkspaceRefresh", "CodeRunWorkspaceDisconnect" }) do
+for _, command in ipairs({
+  "CodeRunWorkspace",
+  "CodeRunWorkspaceRefresh",
+  "CodeRunWorkspaceDisconnect",
+  "CodeRunWorkspaceFind",
+}) do
   assert(vim.fn.exists(":" .. command) == 2)
 end
 local workspace = require("coderunner.workspace")
@@ -577,6 +582,318 @@ test("narrow and wide panels clip by display width and keep fields aligned", fun
       assert(vim.fn.strdisplaywidth(line) < actual)
     end
   end
+end)
+
+test("find uses the root index, focuses a scalar and avoids a redundant refresh", function()
+  assert(workspace.open({ term_id = 51 }))
+  local state = ready(51)
+  local requests = terminals[51].requests
+  assert(state.variables_by_name.answer == state.variables[1])
+  assert(workspace.find("Main.answer", { term_id = 51 }))
+  assert(vim.api.nvim_get_current_win() == workspace.window)
+  assert(workspace.preferred_path == state.variables[1].path)
+  assert(terminals[51].requests == requests and not state.pending)
+  local line = vim.api.nvim_win_get_cursor(workspace.window)[1]
+  assert(vim.api.nvim_buf_get_lines(workspace.buffer, line - 1, line, false)[1]:find("answer", 1, true))
+end)
+
+test("find waits for the first snapshot and expands a visually selected variable", function()
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, { { name = "person", type = "Person", value = "1 field", id = 1, expandable = true } }))
+    else
+      peer:write(frame(id, { { name = "city", type = "String", value = '"Paris"' } }))
+    end
+  end
+  vim.cmd("enew!")
+  vim.bo.filetype = "julia"
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x = person + 1" })
+  local source = vim.api.nvim_get_current_buf()
+  vim.cmd("normal! gg04lv5l" .. vim.api.nvim_replace_termcodes("<Esc>", true, false, true))
+  vim.cmd("'<,'>CodeRunWorkspaceFind term=52")
+  wait_for(function()
+    local state = sessions.sessions[52]
+    return state and state.variables[1] and state.variables[1].children ~= nil
+  end)
+  local state = ready(52)
+  assert(vim.api.nvim_get_current_win() == workspace.window)
+  assert(state.expanded[state.variables[1].path])
+  assert(workspace.preferred_path == state.variables[1].path)
+  assert(terminals[52].requests == 2, "Find should request one snapshot and one expansion")
+  assert(vim.api.nvim_buf_get_lines(source, 0, -1, false)[1] == "x = person + 1")
+  assert(workspace.find("person", { term_id = 52 }))
+  assert(state.expanded[state.variables[1].path], "Repeated find must not collapse the variable")
+  assert(terminals[52].requests == 2)
+end)
+
+test("find refreshes a missing name once and reports absence without moving focus", function()
+  assert(workspace.open({ term_id = 53 }))
+  local state = ready(53)
+  local previous = vim.api.nvim_get_current_win()
+  assert(workspace.find("missing", { term_id = 53 }))
+  wait_for(function()
+    return #messages > 0
+  end)
+  assert(state.sequence == 2 and terminals[53].requests == 2)
+  assert(messages[1]:find("missing", 1, true))
+  assert(vim.api.nvim_get_current_win() == previous)
+  assert(not workspace.pending_find)
+end)
+
+test("find locates newly created Unicode names after one refresh and rebuilds the name index", function()
+  assert(workspace.open({ term_id = 54 }))
+  local state = ready(54)
+  local name = vim.fn.nr2char(945) .. "!"
+  responder = function(peer, id)
+    peer:write(frame(id, { { name = name, type = "Int64", value = "99" } }, false, 2))
+  end
+  assert(workspace.find(name, { term_id = 54 }))
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  assert(state.variables_by_name[name] == state.variables[1])
+  assert(not state.variables_by_name.answer)
+  assert(state.sequence == 2)
+  assert(vim.api.nvim_get_current_win() == workspace.window)
+end)
+
+test("find waits for an in-flight snapshot instead of selecting a stale node", function()
+  assert(workspace.open({ term_id = 55 }))
+  local state = ready(55)
+  local complete
+  responder = function(peer, id)
+    complete = function()
+      peer:write(frame(id, { { name = "fresh", type = "Int64", value = "9" } }, false, 2))
+    end
+  end
+  assert(workspace.refresh({ term_id = 55 }))
+  wait_for(function()
+    return complete ~= nil
+  end)
+  assert(workspace.find("fresh", { term_id = 55 }))
+  assert(workspace.pending_find)
+  complete()
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  assert(workspace.preferred_path == state.variables_by_name.fresh.path)
+  assert(terminals[55].requests == 2)
+end)
+
+test("find reports truncated snapshots and rejects whitespace without sending expressions", function()
+  responder = function(peer, id)
+    peer:write(frame(id, { { name = "answer", type = "Int64", value = "42" } }, true))
+  end
+  assert(workspace.find("not_visible", { term_id = 56 }))
+  wait_for(function()
+    return #messages > 0
+  end)
+  assert(messages[1]:find("truncated", 1, true))
+  assert(messages[1]:find("max_items", 1, true))
+  local requests = terminals[56].requests
+  assert(not workspace.find("answer + 1", { term_id = 56 }))
+  assert(not workspace.find("\n", { term_id = 56 }))
+  assert(terminals[56].requests == requests)
+end)
+
+test("closing or switching panels cancels an asynchronous find", function()
+  auto_connect = false
+  assert(workspace.find("answer", { term_id = 57 }))
+  assert(workspace.pending_find)
+  workspace.close()
+  connect(terminals[57])
+  ready(57)
+  assert(not workspace.pending_find and not workspace.window)
+  auto_connect = true
+  assert(workspace.find("missing", { term_id = 57 }))
+  assert(workspace.open({ term_id = 58 }))
+  ready(58)
+  assert(not workspace.pending_find and workspace.term_id == 58)
+  assert(#messages == 0)
+end)
+
+test("find requires confirmation for unknown terminals and honors explicit names", function()
+  local term = package.loaded["toggleterm.terminal"].Terminal:new({ id = 59 })
+  term:spawn()
+  assert(not workspace.command("find", "answer term=59"))
+  assert(not term.bootstrap)
+  assert(workspace.command("find", "answer term=59 attach", "ignored"))
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  assert(vim.api.nvim_get_current_win() == workspace.window)
+  assert(not workspace.command("find", "answer term=invalid"))
+end)
+
+test("subtree rendering changes only its lines and preserves shifted highlights", function()
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, {
+        { name = "object", type = "Object", value = "1 field", id = 1, expandable = true },
+        { name = "tail", type = "String", value = '"keep"' },
+      }))
+    else
+      peer:write(frame(id, { { name = "field", type = "Int64", value = "42" } }))
+    end
+  end
+  assert(workspace.open({ term_id = 60 }))
+  local state = ready(60)
+  local root = state.variables[1]
+  assert(sessions.expand(60, root, true))
+  wait_for(function()
+    return root.children ~= nil
+  end)
+  local writes, highlighted = {}, 0
+  local set_lines, add_highlight = vim.api.nvim_buf_set_lines, vim.api.nvim_buf_add_highlight
+  vim.api.nvim_buf_set_lines = function(buffer, first, last, strict, lines)
+    if buffer == workspace.buffer then
+      writes[#writes + 1] = { first, last, #lines }
+    end
+    return set_lines(buffer, first, last, strict, lines)
+  end
+  vim.api.nvim_buf_add_highlight = function(buffer, ...)
+    if buffer == workspace.buffer then
+      highlighted = highlighted + 1
+    end
+    return add_highlight(buffer, ...)
+  end
+  local ok, err = pcall(function()
+    assert(sessions.expand(60, root, false))
+    assert(sessions.expand(60, root, true))
+  end)
+  vim.api.nvim_buf_set_lines, vim.api.nvim_buf_add_highlight = set_lines, add_highlight
+  assert(ok, err)
+  assert(vim.deep_equal(writes, { { 6, 8, 1 }, { 6, 7, 2 } }), vim.inspect(writes))
+  assert(highlighted == 9, tostring(highlighted))
+  local namespace = vim.api.nvim_create_namespace("coderunner.workspace")
+  local marks = vim.api.nvim_buf_get_extmarks(workspace.buffer, namespace, { 8, 0 }, { 8, -1 }, { details = true })
+  assert(#marks == 3, vim.inspect(marks))
+  local tick = vim.api.nvim_buf_get_changedtick(workspace.buffer)
+  workspace.render()
+  assert(vim.api.nvim_buf_get_changedtick(workspace.buffer) == tick)
+end)
+
+test("find waits for dirty data and reports a connection timeout once", function()
+  assert(workspace.open({ term_id = 61 }))
+  local state = ready(61)
+  responder = function(peer, id)
+    peer:write(frame(id, { { name = "answer", type = "Int64", value = "99" } }, false, 2))
+  end
+  state.dirty = true
+  assert(workspace.find("answer", { term_id = 61 }))
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  assert(state.variables_by_name.answer.value == "99" and state.sequence == 2)
+  local current = vim.api.nvim_get_current_win()
+  auto_connect = false
+  config.options.workspace.timeout = 100
+  assert(workspace.find("answer", { term_id = 62 }))
+  wait_for(function()
+    return sessions.sessions[62].status == "disconnected"
+  end)
+  assert(not workspace.pending_find)
+  assert(#messages == 1 and messages[1]:find("connect", 1, true))
+  assert(vim.api.nvim_get_current_win() == current)
+end)
+
+test("a newer find replaces an older request while connecting", function()
+  auto_connect = false
+  assert(workspace.find("missing", { term_id = 63 }))
+  assert(workspace.find("answer", { term_id = 63 }))
+  connect(terminals[63])
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  local state = ready(63)
+  assert(workspace.preferred_path == state.variables_by_name.answer.path)
+  assert(terminals[63].requests == 1 and #messages == 0)
+end)
+
+test("find retries an existing error state but reports a failed lookup refresh once", function()
+  assert(workspace.open({ term_id = 64 }))
+  local state = ready(64)
+  for _, status in ipairs({ "error", "timeout" }) do
+    state.status, state.message = status, "Previous request failed"
+    assert(workspace.find("answer", { term_id = 64 }))
+    wait_for(function()
+      return not workspace.pending_find
+    end)
+    assert(state.status == "ready" and #messages == 0)
+  end
+  responder = function(peer, id)
+    peer:write("ERROR\t" .. id .. "\t" .. hex("Lookup refresh failed") .. "\n")
+  end
+  assert(workspace.find("missing", { term_id = 64 }))
+  wait_for(function()
+    return not workspace.pending_find
+  end)
+  assert(#messages == 1 and messages[1] == "Lookup refresh failed")
+  assert(state.sequence == 4 and not state.pending)
+end)
+
+test("incremental updates retain preceding row and header highlights", function()
+  responder = function(peer, id)
+    peer:write(frame(id, {
+      { name = "first", type = "Int64", value = "1" },
+      { name = "second", type = "Int64", value = "2" },
+    }))
+  end
+  assert(workspace.open({ term_id = 65 }))
+  local state = ready(65)
+  local namespace = vim.api.nvim_create_namespace("coderunner.workspace")
+  local function marks(line)
+    return vim.api.nvim_buf_get_extmarks(workspace.buffer, namespace, { line, 0 }, { line, -1 }, { details = true })
+  end
+  assert(#marks(6) == 3)
+  state.variables[2].value = "changed"
+  workspace.render()
+  assert(#marks(6) == 3, vim.inspect(marks(6)))
+  assert(workspace.refresh({ term_id = 65 }))
+  ready(65)
+  assert(#marks(1) == 1, vim.inspect(marks(1)))
+  assert(#marks(6) == 3 and #marks(7) == 3)
+end)
+
+test("WinClosed cancels a find before reopening the same terminal panel", function()
+  auto_connect = false
+  local source = vim.api.nvim_get_current_win()
+  assert(workspace.find("answer", { term_id = 66 }))
+  vim.api.nvim_set_current_win(workspace.window)
+  vim.cmd("close")
+  assert(not workspace.pending_find and not workspace.window)
+  assert(workspace.open({ term_id = 66 }))
+  connect(terminals[66])
+  ready(66)
+  assert(vim.api.nvim_get_current_win() == source)
+  assert(not workspace.pending_find)
+end)
+
+test("find retries an earlier failed child expansion", function()
+  local children = 0
+  responder = function(peer, id, _, fields)
+    if fields[1] == "REFRESH" then
+      peer:write(frame(id, { { name = "object", type = "Object", value = "1 field", id = 1, expandable = true } }))
+    else
+      children = children + 1
+      if children == 1 then
+        peer:write("ERROR\t" .. id .. "\t" .. hex("First expansion failed") .. "\n")
+      else
+        peer:write(frame(id, { { name = "field", type = "Int64", value = "42" } }))
+      end
+    end
+  end
+  assert(workspace.find("object", { term_id = 67 }))
+  wait_for(function()
+    return sessions.sessions[67].status == "error"
+  end)
+  assert(workspace.find("object", { term_id = 67 }))
+  wait_for(function()
+    return sessions.sessions[67].variables[1].children ~= nil
+  end)
+  assert(children == 2)
+  assert(sessions.sessions[67].status == "ready")
+  assert(vim.api.nvim_get_current_win() == workspace.window)
 end)
 
 test("closing the last normal window leaves a usable editor buffer", function()

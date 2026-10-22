@@ -171,13 +171,41 @@ trigger refresh; use `r` in that case.
 **Tree browsing** reads struct fields, nested structs, tuples, named tuples and
 built-in array elements on demand. Struct children mean instance fields, not a
 subtype hierarchy. It uses `getfield`, not user-defined `getproperty` or `show`.
-Uninitialized fields show `#undef`; circular references and depth/node limits
-are marked instead of recursively traversed. Expansions are retained across
+Uninitialized fields show `#undef`; circular references and the total node limit
+are marked instead of recursively traversed. There is no fixed nesting-depth
+limit. Nodes share ancestor links so deep expansion does not copy the full
+ancestor list at every level. The 10,000-node budget and per-expansion
+`max_children` limit still apply. Expansions are retained across
 refreshes, while object references and loaded children are rebuilt for the new
 snapshot. The selected field and scroll position are preserved when possible.
 Each expansion shows at most `max_children` entries, with an omitted-items
 marker for larger objects. Dictionary previews remain summaries rather than
 expandable key/value views.
+
+**Find a variable** from a Julia buffer with `:CodeRunWorkspaceFind`. In normal
+mode it uses the word under the cursor; after selecting a variable name, use
+`:'<,'>CodeRunWorkspaceFind` to use the exact selection. You can also give a name
+and terminal explicitly:
+
+```vim
+:CodeRunWorkspaceFind person
+:CodeRunWorkspaceFind person term=2
+:'<,'>CodeRunWorkspaceFind term=2
+```
+
+The command opens the panel if necessary, focuses and centers the matching root
+variable, and expands its immediate children when expandable. It does not run
+the selected text. Cached variables are found without a root refresh; a missing
+name triggers at most one refresh before reporting that it is absent. First
+connection and in-flight refreshes are handled asynchronously. It targets the
+currently displayed workspace terminal unless `term=N` is given, falling back
+to configured `term_id`. Existing unknown REPLs still require `attach`.
+
+Lookup matches exact names in `Main`, including Unicode names and an optional
+`Main.` prefix. Function-local variables and expressions such as `person.city`
+are not evaluated. If the root snapshot is truncated, raise `workspace.max_items`
+to include omitted variables. Repeated lookup keeps an already-expanded variable
+open. Closing or switching the panel cancels a pending lookup.
 
 - `r` or `:CodeRunWorkspaceRefresh`: refresh immediately.
 - `<CR>` / `<Space>`: expand or collapse an object; inspect a leaf.
@@ -209,6 +237,8 @@ disconnection. If a REPL does not support the hook, the sidebar displays
 When upgrading from the original Workspace version, restart the Julia process
 as well as Neovim: the helper protocol has changed. An old helper is rejected
 with a restart message rather than silently reusing incompatible objects.
+Also restart an already-running Julia process to pick up the removal of the
+old eight-level expansion limit; the helper is loaded only once per process.
 
 Optional settings (shown with defaults):
 
@@ -285,6 +315,12 @@ end, {
   desc = "Run current Tree-sitter item in background",
 })
 
+vim.keymap.set({ "n", "x" }, "<leader>rf", function()
+  require("coderunner").find_workspace_variable()
+end, {
+  desc = "Find Julia variable in workspace",
+})
+
 vim.keymap.set("x", "<leader>rs", function()
   require("coderunner").run_selection("show term=2")
 end, {
@@ -293,6 +329,11 @@ end, {
 ```
 
 Lua helpers accept the same argument string as commands:
+
+- `require("coderunner").find_workspace_variable("term=2")`: use the live visual
+  selection, or the cursor word in normal mode.
+- `require("coderunner.workspace").find("person", { term_id = 2 })`: find a name
+  directly; returns whether the lookup was accepted (completion may be asynchronous).
 
 - `require("coderunner").run_block("hide nojump")`
 - `require("coderunner").run_line("term=2 show jump")`
@@ -321,9 +362,16 @@ requires Julia, the parsers, and an installed toggleterm.nvim. Set
 `TOGGLETERM_RTP=/path/to/toggleterm.nvim` if the plugin is not under
 `stdpath("data")/site/pack/core/opt/toggleterm.nvim`.
 
+Traversal and hex decoding reuse caches, while the panel indexes root names
+and visible paths. Expanding or collapsing updates only the changed text and
+highlights; unchanged rows and their highlighting are retained.
+
 `make bench-workspace` runs opt-in expansion microbenchmarks: Julia field
 traversal, real loopback TCP responses, and cached expand/collapse rendering
-with 50, 500 and 2000 root variables. It reports first-use and warm median times,
+with 50, 500 and 2000 root variables, plus cached variable-lookup timings. It reports first-use and warm median times,
 without timing thresholds in CI. Helper loading is outside these timings;
 common traversal code is precompiled during loading, without reading user
 objects. This needs Julia and Neovim, but no parsers or toggleterm.
+
+Measured before/after results and validation details are recorded in
+[Workspace verification](docs/workspace-verification.md).

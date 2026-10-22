@@ -3,6 +3,10 @@ local uv = vim.uv or vim.loop
 local M = { sessions = {}, known = {} }
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
 local MAX_BYTES = 8 * 1024 * 1024
+local bytes = {}
+for value = 0, 255 do
+  bytes[("%02x"):format(value)] = string.char(value)
+end
 local pump, schedule_auto
 
 local function close(handle)
@@ -66,13 +70,17 @@ end
 
 local function decode(value)
   assert(#value % 2 == 0 and not value:find("[^%da-f]"), "Invalid text encoding")
-  return (value:gsub("..", function(byte)
-    return string.char(tonumber(byte, 16))
-  end))
+  return (value:gsub("..", bytes))
 end
 
 local function attach_rows(session, rows, parent)
+  if not parent then
+    session.variables_by_name = {}
+  end
   for _, node in ipairs(rows) do
+    if not parent then
+      session.variables_by_name[node.name] = node
+    end
     node.parent = parent
     node.path = (parent and parent.path or "") .. "/" .. #node.name .. ":" .. node.name
     if node.expandable then
